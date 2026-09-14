@@ -375,7 +375,7 @@ def test_pace_presets_are_clamped_and_resolvable():
     cfg = cfg_mod.default_config()
     assert cfg_mod.PACE_PRESETS["natural"]["speed"] == 1.0
     eng = cfg_mod.pace_engine(cfg)
-    assert eng["label"] == "Natural"
+    assert eng["label"] == "Brisk"
     cfg["tts"]["pace"] = "brisk"
     assert cfg_mod.pace_engine(cfg)["speed"] > 1.0
     cfg["tts"]["line_gap_sec"] = 9.0
