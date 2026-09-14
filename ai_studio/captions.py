@@ -97,8 +97,8 @@ DEFAULT_STYLE: dict = {
     "margin_h_pct": 6.0,            # % of width
     "margin_v_pct": 7.0,            # % of height
     "line_spacing": 1.25,           # multiplier on natural leading (\pos layout)
-    "max_line_width_pct": 88.0,     # % of width — wrap budget
-    "max_lines": 2,
+    "max_line_width_pct": 92.0,     # % of width — wrap budget
+    "max_lines": 3,
     "karaoke": False,               # word-highlight sweep (proportional timing)
 }
 
