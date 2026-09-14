@@ -388,6 +388,7 @@ def wrap_block(text: str, style: dict, shaper: Shaper, out_w: int) -> dict:
     source text are hard breaks."""
     from . import khmer as kh
 
+    text = kh.normalize(text or "")
     budget = max(40.0, out_w * style["max_line_width_pct"] / 100.0
                  - (2.0 * style["panel"]["padding_px"] if style["panel"]["enabled"] else 0.0))
     lines: list[str] = []

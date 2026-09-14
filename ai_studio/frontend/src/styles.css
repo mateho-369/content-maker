@@ -38,7 +38,16 @@ body {
   font: 13px/1.45 "Inter", var(--km), "Segoe UI", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
-:lang(km), .km { font-family: var(--km); }
+:lang(km), .km,
+.cap-sample, .scene-text {
+  font-family: var(--km);
+  font-kerning: normal;
+  font-variant-ligatures: common-ligatures contextual;
+  font-feature-settings: "ccmp", "liga", "clig", "mark", "mkmk";
+  text-rendering: optimizeLegibility;
+  letter-spacing: normal;
+  word-spacing: normal;
+}
 /* visible keyboard focus everywhere */
 :focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; border-radius: 4px; }
 input.invalid { border-color: var(--red) !important; }
@@ -262,7 +271,8 @@ textarea.scene-text { min-height: 54px; }
 .cap-frame.land { aspect-ratio: 16 / 9; max-height: 260px; }
 .cap-preview-img { width: 100%; height: 100%; object-fit: contain; display: block; }
 .cap-sample {
-  margin-top: 8px; font-family: var(--km); font-size: 14px; line-height: 1.8;
+  margin-top: 8px; font-size: 14px; line-height: 2.1; min-height: 74px;
+  overflow: auto; transform: none; vertical-align: baseline;
 }
 .cap-warn { color: #f2cf7b; margin-top: 6px; }
 .mini-tabs { display: flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }

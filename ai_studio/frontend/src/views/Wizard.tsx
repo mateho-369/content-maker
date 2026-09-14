@@ -199,7 +199,7 @@ export function Wizard({ onClose, onCreated }: { onClose: () => void; onCreated:
                     ✕ mark selection as not spoken</button>
                   <span className="hint">use [[silent: text]] anywhere — kept on screen, never sent to TTS</span>
                 </div>
-                <textarea ref={scriptRef} rows={7} value={script} onChange={(e) => setScript(e.target.value)}
+                <textarea ref={scriptRef} lang="km" spellCheck={false} rows={7} value={script} onChange={(e) => setScript(e.target.value)}
                   placeholder={"ជីវិតមនុស្ស មិនមែនជាប្រណាំងទេ។\nវាគឺជាដំណើរ ដែលយើងត្រូវរៀនដើរម្ដងមួយជំហាន។"} />
                 <SilentPreview text={script} />
               </label>

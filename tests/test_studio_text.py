@@ -27,6 +27,17 @@ def test_normalize_keeps_khmer_and_single_spaces():
     assert out.startswith("សួស្ដី") and "  " not in out.strip()
 
 
+def test_display_text_preserves_contextual_coeng_sequences():
+    samples = ("ស្រឡាញ់", "ស្តាប់", "ក្តី", "ខ្មែរ")
+    for sample in samples:
+        rendered = khmer.display_text(sample)
+        assert rendered == khmer.normalize(sample)
+        clusters = khmer.split_clusters(rendered)
+        assert clusters
+        assert not any(cluster == khmer.COENG for cluster in clusters)
+        assert not any(cluster.endswith(khmer.COENG) for cluster in clusters)
+
+
 def test_split_and_join_roundtrip_is_whitespace_stable():
     parts = khmer.split_sentences(SCRIPT)
     assert len(parts) == 5

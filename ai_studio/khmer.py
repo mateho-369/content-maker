@@ -343,8 +343,14 @@ def spoken_text(text):
 
 
 def display_text(text):
-    """Everything that should appear on screen: brackets removed, words kept."""
-    return _SILENT_RE.sub(lambda m: m.group(1) or "", text or "")
+    """Everything that should appear on screen, normalized as one Unicode run.
+
+    Khmer shaping is contextual: a coeng and its following consonant must reach
+    the shaping engine in the same normalized text run.  Normalizing here
+    keeps captions, SRT output, and burned ASS text on the same code-point
+    sequence without changing the author's visible wording.
+    """
+    return normalize(_SILENT_RE.sub(lambda m: m.group(1) or "", text or ""))
 
 
 def has_silent_markup(text):

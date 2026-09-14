@@ -63,6 +63,39 @@ def test_every_font_shapes_khmer_with_harfbuzz():
             assert width > 100, f"{fid}/{w} shaped to implausible width {width}"
 
 
+@pytest.mark.skipif(not HAS_UHB or not media._has_filter("subtitles"),
+                    reason="needs HarfBuzz and FFmpeg libass subtitles filter")
+def test_production_burn_rasterizes_coeng_clusters_for_all_bundled_faces(tmp_path):
+    """Exercise the same ASS + libass burn path used by final MP4 exports."""
+    samples = "ស្រឡាញ់ ស្តាប់ ក្តី ខ្មែរ ជីវិតមនុស្ស"
+    sizes = ((1080, 1920), (720, 1280), (1920, 1080))
+    for width, height in sizes:
+        for font_id, font_spec in cap.FONTS.items():
+            for weight in font_spec["weights"]:
+                style, _ = cap.validate_style({
+                    "preset": "custom", "font": font_id, "weight": weight,
+                    "size_pct": 4.6, "max_lines": 3,
+                })
+                stem = f"{font_id}_{weight}_{width}x{height}"
+                ass = str(tmp_path / f"{stem}.ass")
+                base = str(tmp_path / f"{stem}.base.mp4")
+                burned = str(tmp_path / f"{stem}.burned.mp4")
+                frame = str(tmp_path / f"{stem}.png")
+                cap.build_ass([(0.0, 3.0, samples)], style, width, height, ass)
+                with open(ass, encoding="utf-8") as handle:
+                    ass_text = handle.read()
+                assert all(word in ass_text for word in samples.split())
+                assert "\u17d2" in ass_text
+                media.run_ffmpeg([
+                    "-f", "lavfi", "-i", f"color=c=white:s={width}x{height}:r=30",
+                    "-t", "3", "-c:v", "libx264", "-pix_fmt", "yuv420p", base,
+                ])
+                media.burn_ass(base, ass, burned)
+                media.run_ffmpeg(["-i", burned, "-ss", "1", "-frames:v", "1", frame])
+                assert os.path.getsize(burned) > 1024
+                assert os.path.getsize(frame) > 1024
+
+
 # ------------------------------------------------------------------ validation
 def test_validate_clamps_and_reports():
     s, issues = cap.validate_style({

@@ -623,9 +623,9 @@ def burn_subtitles(video, srt, dst, force_style="FontName=Khmer OS Battambang,Fo
 def burn_ass(video, ass, dst, style="karaoke"):
     """Burn an .ass file (karaoke ``\\k`` tags) via the same libass filter.
 
-    fontsdir always includes the studio's bundled Khmer fonts first, so the
-    families named in the .ass (Noto Sans Khmer, Kantumruy Pro, …) resolve on
-    any machine — Windows included — instead of gambling on system fonts."""
+    fontsdir is intentionally restricted to the studio's bundled Khmer fonts,
+    so the family named in the .ass (Noto Sans Khmer, Kantumruy Pro, …) cannot
+    silently resolve to a different system font on Windows."""
     if not _has_filter("subtitles"):
         raise RuntimeError("this ffmpeg build has no 'subtitles' filter (needs libass) — "
                            "cannot burn captions with this ffmpeg build")
@@ -637,10 +637,7 @@ def burn_ass(video, ass, dst, style="karaoke"):
         shipped = fonts_dir() if os.path.isdir(fonts_dir()) else ""
     except Exception:
         shipped = _shipped_font_dir() or ""
-    win_fonts = os.environ.get("SystemRoot", r"C:\Windows") + r"\Fonts" if os.name == "nt" else ""
     fontsdir = shipped or (_shipped_font_dir() or "")
-    if win_fonts and os.path.isdir(win_fonts) and win_fonts != fontsdir:
-        fontsdir = f"{fontsdir}:{win_fonts}" if fontsdir else win_fonts
     if fontsdir and os.path.isdir(fontsdir):
         vf += f":fontsdir='{fontsdir.replace(chr(92), '/').replace(':', chr(92) + ':')}'"
     run_ffmpeg(["-i", video, "-vf", vf,

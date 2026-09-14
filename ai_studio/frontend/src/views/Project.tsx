@@ -268,7 +268,7 @@ function SceneBoard({ proj, scenes, rows, assets, sel, onSel, onChanged, act, bu
               <tr key={i} onClick={() => onSel(i)} style={{ cursor: "pointer", background: sel === i ? "#242a35" : undefined }}>
                 <td><b>{i + 1}</b>{s.meta?.side ? <><br /><Badge>{s.meta.side}</Badge></> : null}</td>
                 <td>
-                  <textarea className="scene-text" value={s.text} rows={2}
+                  <textarea className="scene-text" lang="km" spellCheck={false} value={s.text} rows={2}
                     onChange={(e) => setDraft(draft.map((x, j) => j === i ? { ...x, text: e.target.value } : x))} />
                   {s.meta?.character_id ? <div className="hint">🧑 {s.meta.character_id.slice(0, 10)}</div> : null}
                 </td>

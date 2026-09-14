@@ -166,7 +166,7 @@ export function CaptionStudio({ projectId, initial, onChanged }: {
             <div className={`cap-frame ${landscape ? "land" : ""}`}>
               {previewUrl && <img src={previewUrl} alt="caption preview" className="cap-preview-img" />}
             </div>
-            <textarea className="cap-sample" rows={2} value={sample}
+            <textarea className="cap-sample" lang="km" spellCheck={false} rows={2} value={sample}
               onChange={(e) => setSample(e.target.value)}
               placeholder="preview text (Khmer)…" />
             {issues.length > 0 && (
