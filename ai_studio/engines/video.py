@@ -204,13 +204,14 @@ def _still_clip(image, scene, out_path, cfg, plan, total, progress, seed):
         media.make_silent_video_from_image(
             image, out_path, duration=max(0.8, float(total)),
             width=int(v.get("width", 480)), height=int(v.get("height", 854)),
-            fps=min(24, int(v.get("fps", 16)) + 4), motion="kenburns")
-        return {"ok": True, "engine": "kenburns", "path": out_path, "duration": total,
+            fps=min(24, int(v.get("fps", 16)) + 4),
+            motion="static")
+        return {"ok": True, "engine": "static", "path": out_path, "duration": total,
                 "width": int(v.get("width", 480)), "height": int(v.get("height", 854)),
                 "fps": int(v.get("fps", 16)), "still_image": os.path.basename(image),
                 "prompt": compose_prompt(scene, cfg), "target_duration": float(total)}
     except Exception as e:
-        return {"ok": False, "engine": "kenburns", "reason": f"still clip failed: {str(e)[:200]}"}
+        return {"ok": False, "engine": "static", "reason": f"still clip failed: {str(e)[:200]}"}
 
 
 def previz_clip(scene, out_path, cfg, target_duration, progress=None, seed=0, character=False):

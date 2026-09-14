@@ -72,9 +72,9 @@ DEFAULTS = {
         "model_dir": "models/tts/vits-mms-khm",     # sherpa-onnx VITS dir (model.onnx + tokens.txt)
         "sherpa_cli": "",                           # path to sherpa-onnx-offline-tts (optional)
         "language": "km",
-        "speed": 1.0,                               # calm narration: <= 1.0 recommended
+        "speed": 0.95,                              # calm narration: <= 1.0 recommended
         "pace": "natural",                          # slow | natural | brisk (plain-language Pace)
-        "line_gap_sec": 1.0,                        # deterministic silence between lines/scenes
+        "line_gap_sec": 0.4,                        # short natural pause between scenes
         "sample_rate": 0,                           # 0 = take it from the model
         "speaker_id": 0,
         "crossfade_ms": 30,
@@ -131,6 +131,7 @@ DEFAULTS = {
         "min_frames": 17,
         "frames_per_sec_budget": 16,
         "motion_strength": 0.75,
+        "still_motion": "none",                    # custom stills stay locked; no Ken Burns shake
         "negative_prompt": style_mod.DEFAULT_NEGATIVE,
         "style_tail": "calm documentary look, soft natural light, gentle slow camera drift, "
                       "muted warm palette, peaceful natural scenery, film-like, no text, no captions",
@@ -142,7 +143,7 @@ DEFAULTS = {
         "upload_start_frame": True,                 # TI2V: send a reference image when available
     },
     "sfx": {                                        # Stage 5
-        "engine": "auto",                           # auto | mmaudio | procedural | defer | off
+        "engine": "off",                            # auto | mmaudio | procedural | defer | off
         "workflow": "mmaudio_small_480p",
         "duration_pad_sec": 0.35,
         "voice_duck_gain": 0.32,                    # ambience sits *under* narration
@@ -182,7 +183,7 @@ DEFAULTS = {
         "emit_srt": True,
         "emit_manifest": True,
         "fade_sec": 0.35,
-        "transition": "crossfade",                  # crossfade | cut
+        "transition": "cut",                        # crossfade | cut
         "burn_captions": False,
         "subtitle_style": "clean",                  # clean | bold_yellow | minimal_top | karaoke
         "title_style": "",                          # '' = no card | centered_fade | bottom_left_minimal | bold_pop
