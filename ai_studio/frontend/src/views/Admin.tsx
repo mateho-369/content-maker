@@ -40,7 +40,7 @@ function Services({ status }: { status: StatusPayload | null }) {
     setBusy(true);
     try {
       const [p, f] = await Promise.all([
-        api("/settings/probe"),
+        api("/settings/probe", { method: "POST" }),
         api("/status", { query: { deep: true } }).catch(() => null),
       ]);
       setProbe(p);

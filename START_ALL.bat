@@ -8,16 +8,15 @@ chcp 65001 >nul
 set "DIR=%~dp0"
 if "%DIR:~-1%"=="\" set "DIR=%DIR:~0,-1%"
 
-:: If we are inside Auto-Clip-Engine, ROOT is one up, else we are already in root
+:: Use the PowerShell launcher because it handles service processes more reliably.
 if exist "%DIR%\ai_studio\app.py" (
-  :: Inside Engine
-  call "%DIR%\START.bat" %*
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%DIR%\START.ps1" %*
 ) else (
-  :: Inside root auto-clip\
-  if exist "%DIR%\Auto-Clip-Engine\START.bat" (
-    call "%DIR%\Auto-Clip-Engine\START.bat" %*
+  if exist "%DIR%\Auto-Clip-Engine\START.ps1" (
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%DIR%\Auto-Clip-Engine\START.ps1" %*
   ) else (
-    echo [ERROR] Cannot find Auto-Clip-Engine\START.bat at %DIR%\Auto-Clip-Engine\START.bat
+    echo [ERROR] Cannot find Auto-Clip-Engine\START.ps1 at %DIR%\Auto-Clip-Engine\START.ps1
     pause
+    exit /b 1
   )
 )

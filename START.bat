@@ -72,7 +72,7 @@ if %ERRORLEVEL%==0 (
 )
 if "%PY_CMD%"=="" (
   where python >nul 2>&1
-  if %ERRORLEVEL%==0 set "PY_CMD=python"
+  if !ERRORLEVEL!==0 set "PY_CMD=python"
 )
 if "%PY_CMD%"=="" (
   echo [ERROR] Python not found! Install Python 3.11 from https://python.org
@@ -126,7 +126,7 @@ if not defined STUDIO_PY (
 :: 3. ffmpeg check
 :: ----------------------------------------------------------
 where ffmpeg >nul 2>&1
-if %ERRORLEVEL%==0 (
+if !ERRORLEVEL!==0 (
   echo [OK] ffmpeg found
 ) else (
   echo [WARN] ffmpeg not on PATH - will try bundled imageio-ffmpeg
@@ -138,7 +138,7 @@ if %ERRORLEVEL%==0 (
 :: ----------------------------------------------------------
 if "%SKIP_OLLAMA%"=="0" (
   where ollama >nul 2>&1
-  if %ERRORLEVEL%==0 (
+  if !ERRORLEVEL!==0 (
     echo [OK] Ollama installed
     :: Check if running
     powershell -NoProfile -Command "try { Invoke-WebRequest -Uri http://127.0.0.1:%OLLAMA_PORT%/api/tags -TimeoutSec 2 -UseBasicParsing | Out-Null; exit 0 } catch { exit 1 }" >nul 2>&1
