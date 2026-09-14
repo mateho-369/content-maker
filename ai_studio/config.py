@@ -72,9 +72,9 @@ DEFAULTS = {
         "model_dir": "models/tts/vits-mms-khm",     # sherpa-onnx VITS dir (model.onnx + tokens.txt)
         "sherpa_cli": "",                           # path to sherpa-onnx-offline-tts (optional)
         "language": "km",
-        "speed": 0.95,                              # calm narration: <= 1.0 recommended
-        "pace": "natural",                          # slow | natural | brisk (plain-language Pace)
-        "line_gap_sec": 0.4,                        # short natural pause between scenes
+        "speed": 1.08,                              # fresher, more energetic Khmer delivery
+        "pace": "brisk",                            # slow | natural | brisk (plain-language Pace)
+        "line_gap_sec": 0.35,                       # short natural pause between scenes
         "sample_rate": 0,                           # 0 = take it from the model
         "speaker_id": 0,
         "crossfade_ms": 30,
@@ -184,7 +184,7 @@ DEFAULTS = {
         "emit_manifest": True,
         "fade_sec": 0.35,
         "transition": "cut",                        # crossfade | cut
-        "burn_captions": False,
+        "burn_captions": True,
         "subtitle_style": "clean",                  # clean | bold_yellow | minimal_top | karaoke
         "title_style": "",                          # '' = no card | centered_fade | bottom_left_minimal | bold_pop
         "title_text": "",                           # '' = use project title
