@@ -58,6 +58,10 @@ render settings.
 - If burned captions are requested but the burn fails, the pipeline **fails
   loudly** — it never silently hands you an uncaptioned MP4. The manifest
   records font file, renderer, timing and warnings for every export.
+- Final burns use only the bundled Khmer font directory. FFmpeg must report
+  the `subtitles` filter with HarfBuzz/libass shaping enabled; Windows system
+  fonts are deliberately not added as a fallback because they can change
+  coeng/subscript glyph placement between machines.
 
 ## Windows
 
@@ -81,5 +85,8 @@ PYTHONPATH=. pytest tests/test_studio_captions.py tests/test_studio_caption_wrap
 PYTHONPATH=. pytest -q                # whole suite
 ```
 
-Shaping-dependent tests skip automatically when `uharfbuzz`/`khmercut` are
-absent (e.g. minimal CI), so the suite stays green everywhere.
+The production-burn regression renders difficult coeng sequences, punctuation,
+regular/bold faces, and portrait/landscape MP4s through the same ASS + FFmpeg
+`subtitles` path used by final exports. Shaping-dependent tests skip
+automatically when `uharfbuzz`/`khmercut` are absent (e.g. minimal CI), so the
+suite stays green everywhere.
