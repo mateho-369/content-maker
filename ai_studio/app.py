@@ -284,6 +284,25 @@ def create_app(data_root=None, enable_demo_seed=False):
   </header>
 
   <main class="grid">
+    <!-- Card 0: Love vs Situationship White Background + Internet Photos -->
+    <div class="card" style="border-color: #38bdf8; box-shadow: 0 0 20px rgba(56,189,248,0.2);">
+      <div class="card-header" style="background: rgba(56,189,248,0.06);">
+        <span class="badge" style="background: #0284c7; color: #fff;">Featured · White Studio BG & Internet Examples</span>
+        <div class="card-title">❤️ Real Love vs Situationship 💔 (White Background Studio)</div>
+        <div class="card-desc">Internet Photos · Mascot Actions (Thinking/Point/Meme/CTA) · Coeng Subtitles · Free Khmer Voice</div>
+      </div>
+      <div class="video-wrap" style="background: #f8fafc;">
+        <video controls playsinline preload="metadata">
+          <source src="/outputs/love_vs_situationship_white_bg/Love_vs_Situationship_WhiteBG.mp4" type="video/mp4">
+          Your browser does not support the video tag.
+        </video>
+      </div>
+      <div class="card-footer">
+        <span>38.41s · 720×1280 · H.264 / AAC</span>
+        <a class="download-btn" href="/outputs/love_vs_situationship_white_bg/Love_vs_Situationship_WhiteBG.mp4" download>Download MP4 ↓</a>
+      </div>
+    </div>
+
     <!-- Card 1: Myth vs Fact -->
     <div class="card">
       <div class="card-header">
