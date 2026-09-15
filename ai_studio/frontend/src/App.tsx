@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { api, StatusPayload } from "./api";
 import { useToast } from "./main";
 import { errText } from "./main";
-import { StatusBadge } from "./ui";
+import { StatusBadge, TtsVoiceBadge } from "./ui";
 import { ProjectsView } from "./views/Projects";
 import { ProjectView } from "./views/Project";
 import { AdminView, SERVICES } from "./views/Admin";
@@ -84,6 +84,7 @@ export default function App() {
         <span className="crumb">{route.view === "project" ? "project" : route.view}</span>
         <span className="spacer" />
         {header}
+        <TtsVoiceBadge status={status} variant="pill" />
         <button className="btn tiny" onClick={() => refreshStatus(false)} title="re-probe">⟳</button>
       </div>
       <div className="body">

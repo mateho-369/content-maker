@@ -25,6 +25,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 
 from . import __version__, config as cfg_mod, content as content_mod, khmer, media, style as style_mod
 from . import vram as vram_mod
+from .engines import tts as tts_engine
 from .db import Database
 from .events import RunProgress
 from .pipeline import spec as stagespec
@@ -60,6 +61,9 @@ async def api_status(deep: bool = Query(False)):
             "data_dir": st.data_root, "db": st.db.stats(),
             "machine": plan.get("hardware"), "plan": plan, "capabilities": caps,
             "vram": await asyncio.to_thread(vram_mod.status, cfg, plan),
+            # Cheap filesystem probe (model.onnx present?) driving the web UI's
+            # green/yellow Khmer-voice badge; safe on the 15s status poll.
+            "tts": await asyncio.to_thread(tts_engine.voice_status, cfg),
             "active_runs": [r["id"] for r in st.db.active_runs()],
             "ffmpeg": await asyncio.to_thread(lambda: __import__("ai_studio.util",
                                                                   fromlist=["ffmpeg_exe"])

@@ -1,4 +1,71 @@
 import React from "react";
+import { StatusPayload, TtsVoiceStatus } from "./api";
+
+// Verbatim user-facing copy for the Khmer-voice status badge.
+export const TTS_NATIVE_TEXT = "✅ Native Khmer Voice (Meta MMS VITS) Active";
+export const TTS_PLACEHOLDER_TEXT =
+  "⚠️ Placeholder Audio Active. Please run 2_SETUP_KHMER_TTS.bat to enable real Khmer voice.";
+
+export function ttsVoiceText(tts?: TtsVoiceStatus | null): string {
+  return tts?.native_voice ? TTS_NATIVE_TEXT : TTS_PLACEHOLDER_TEXT;
+}
+
+/**
+ * Green/yellow indicator for whether the real Meta MMS VITS Khmer voice is
+ * installed. `pill` is the compact topbar version (full text in its tooltip);
+ * `banner` is the full-width dashboard/settings panel.
+ */
+export const TtsVoiceBadge = ({ status, variant = "pill" }: {
+  status?: StatusPayload | null; variant?: "pill" | "banner";
+}) => {
+  const tts = status?.tts;
+  if (!tts) return null;
+  const native = tts.native_voice;
+  const setup = tts.setup_script || "2_SETUP_KHMER_TTS.bat";
+  const render = tts.render_script || "3_RENDER_ALL_VIDEOS.bat";
+  const title = ttsVoiceText(tts);
+
+  if (variant === "banner") {
+    return (
+      <div className={`voice-banner ${native ? "ok" : "warn"}`} role="status">
+        <span className="voice-dot" />
+        <div className="grow">
+          <b>{title}</b>
+          <div className="voice-sub">
+            {native ? (
+              <>
+                VITS model: <code>{tts.model || tts.model_dir || "model.onnx"}</code>
+                {tts.model_bytes ? ` · ${(tts.model_bytes / 1e6).toFixed(0)} MB` : ""}
+                {!tts.ready && (
+                  <>
+                    {" "}— model found, but it is not fully usable yet
+                    {!tts.tokens_present && " (tokens.txt missing)"}
+                    {!tts.runtime_python && !tts.runtime_cli && " (sherpa-onnx runtime missing)"}
+                    ; re-run <code>{setup}</code>.
+                  </>
+                )}
+              </>
+            ) : (
+              <>
+                Renders currently use speech-shaped placeholder audio (“តុកៗ”), not a real Khmer
+                voice. Run <code>{setup}</code> once to download the Meta MMS VITS model, then run{" "}
+                <code>{render}</code> to re-render with the native voice. Expected at{" "}
+                <code>models/tts/vits-mms-khm/model.onnx</code> inside the studio data folder.
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <span className={`voice-pill ${native ? "ok" : "warn"}`} title={title} role="status">
+      <span className="voice-dot" />
+      {native ? "Khmer voice · native" : "Khmer voice · placeholder"}
+    </span>
+  );
+};
 
 export const Panel = ({ title, right, children, className = "", scroll }: {
   title?: React.ReactNode; right?: React.ReactNode; children?: React.ReactNode;
