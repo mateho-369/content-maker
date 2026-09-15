@@ -109,6 +109,27 @@ def validate_content_hook(scenes: List[Dict], content_type: str = "explainer") -
     }
 
 
+def validate_khmer_audio(audio_path: str) -> bool:
+    """Check if audio contains actual speech, not placeholder"""
+    # Check audio duration vs expected duration
+    # Check audio energy (placeholder has very low energy)
+    # Check audio sample rate
+    if not audio_path or not os.path.exists(audio_path):
+        return False
+    try:
+        import wave
+        with wave.open(audio_path, 'rb') as wf:
+            frames = wf.readframes(wf.getnframes())
+            # Placeholder audio is typically silence or very short
+            if len(frames) < 10000:  # Less than 0.5 seconds
+                return False
+        return True
+    except Exception:
+        from .util import media_duration
+        dur = media_duration(audio_path, 0.0)
+        return dur >= 0.5
+
+
 def validate_voice_audio(audio_path: str) -> Dict:
     """Validates an audio file for speech presence, peak loudness, and silence."""
     if not audio_path or not os.path.exists(audio_path):

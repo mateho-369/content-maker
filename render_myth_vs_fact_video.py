@@ -70,13 +70,16 @@ SCENES = [
 
 
 def render_myth_fact():
+    os.environ.setdefault("STUDIO_DATA_DIR", os.path.join(REPO_ROOT, "data", "studio"))
     cfg = cfg_mod.load()
+    tts_provider = tts.get_tts_provider(cfg)
     char_asset = os.path.join(REPO_ROOT, "ai_studio", "assets", "character_default.png")
     scene_clips = []
     ass_dialogues = []
     current_time = 0.0
 
     print("=== Step 1: Synthesizing Audio & Rendering Scene Clips ===")
+    print("Using Edge-TTS provider: km-KH-PisethNeural")
     for s in SCENES:
         idx = s["idx"]
         text = s["text"]
@@ -90,7 +93,9 @@ def render_myth_fact():
 
         # 1. Audio
         audio_out = os.path.join(OUTPUT_DIR, f"scene_{idx}_audio.wav")
-        res_tts = tts.synthesize(text, audio_out, cfg, emotion_style=emotion)
+        res_tts = tts_provider.synthesize_to_file(text, audio_out, emotion=emotion)
+        if not res_tts.get("ok"):
+            res_tts = tts.synthesize(text, audio_out, cfg, emotion_style=emotion)
         assert res_tts["ok"]
         aud_check = qa.validate_voice_audio(audio_out)
         dur = max(2.5, aud_check["duration"])
@@ -160,6 +165,11 @@ def render_myth_fact():
         print(f"  ✓ Extracted {fname} at {t_sec}s")
 
     print("\n=== Step 5: Running QA Gate Verification ===")
+    audio_sample = os.path.join(OUTPUT_DIR, "scene_0_audio.wav")
+    if qa.validate_khmer_audio(audio_sample):
+        print("  Khmer audio validation: PASSED")
+    else:
+        print("  Khmer audio validation: FAILED")
     full_qa = qa.run_full_project_qa(SCENES, final_mp4_path=final_mp4, content_type="myth_vs_fact")
     print("  QA Gate Approved:", full_qa["approved"])
     print("  Failures:", full_qa["failures"])

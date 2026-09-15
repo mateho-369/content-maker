@@ -71,7 +71,14 @@ def sherpa_bin(cfg):
 
 def available_engines(cfg):
     """What this machine can do right now (used by /api/status and the settings UI)."""
-    out = {"sherpa_model": bool(resolve_model(cfg)[0]),
+    edge_avail = False
+    try:
+        from .edge_tts_provider import EdgeTTSProvider
+        edge_avail = True
+    except Exception:
+        pass
+    out = {"edge_tts": edge_avail,
+           "sherpa_model": bool(resolve_model(cfg)[0]),
            "sherpa_python": _python_api(),
            "sherpa_cli": bool(sherpa_bin(cfg)),
            "piper": bool(shutil.which("piper")),
@@ -217,7 +224,7 @@ def synthesize(text, out_wav, cfg, engine="auto", progress=None, seed=0, emotion
 
     target_emotion = emotion or emotion_style or cfg_t.get("emotion") or cfg.get("pipeline", {}).get("emotion") or "calm"
     target_speed = float(cfg_t.get("speed", 1.0))
-    provider_id = provider_name or (engine if engine in ("sherpa", "huggingface", "placeholder", "local_sherpa") else cfg_t.get("provider", "auto"))
+    provider_id = provider_name or (engine if engine in ("edge_tts", "sherpa", "huggingface", "placeholder", "local_sherpa") else cfg_t.get("provider", "auto"))
 
     # Use unified provider architecture with emotional post-processing
     try:
@@ -238,11 +245,13 @@ def synthesize(text, out_wav, cfg, engine="auto", progress=None, seed=0, emotion
         pass
 
     # Direct fallback chain if provider call raised unexpectedly
-    want = engine if engine in ("sherpa", "piper", "kokoro", "placeholder") else "auto"
-    chain = (["sherpa", "piper", "kokoro", "placeholder"] if want == "auto" else [want, "placeholder"])
+    want = engine if engine in ("edge_tts", "sherpa", "piper", "kokoro", "placeholder") else "auto"
+    chain = (["edge_tts", "sherpa", "piper", "kokoro", "placeholder"] if want == "auto" else [want, "placeholder"])
     attempts = []
     for choice in chain:
-        if choice == "sherpa":
+        if choice == "edge_tts":
+            res = _try_edge_tts(text, out_wav, cfg, progress, attempts, emotion=target_emotion)
+        elif choice == "sherpa":
             res = _try_sherpa(text, out_wav, cfg, progress, attempts)
         elif choice == "piper":
             res = _try_piper(text, out_wav, cfg, progress, attempts)
@@ -255,6 +264,105 @@ def synthesize(text, out_wav, cfg, engine="auto", progress=None, seed=0, emotion
             return res
     return {"ok": False, "reason": "; ".join(attempts) or "no TTS engine available",
             "engine": "none", "attempts": attempts}
+
+
+def _try_edge_tts(text, out_wav, cfg, progress=None, attempts=None, emotion="neutral"):
+    try:
+        from .edge_tts_provider import EdgeTTSProvider
+        provider = EdgeTTSProvider()
+        res = provider.synthesize_to_file(text, out_wav, gender="male", emotion=emotion)
+        if res.get("ok") and os.path.exists(out_wav) and os.path.getsize(out_wav) > 100:
+            return res
+        if attempts is not None:
+            attempts.append(f"edge-tts: {res.get('reason', 'invalid output')}")
+    except Exception as e:
+        if attempts is not None:
+            attempts.append(f"edge-tts error: {str(e)[:120]}")
+    return {"ok": False}
+
+
+class VitsTTSProvider:
+    """Sherpa-ONNX / Meta MMS-VITS Khmer provider."""
+    def __init__(self, cfg=None):
+        self.cfg = cfg or {}
+        self.voice = "Meta MMS-VITS (facebook/mms-tts-khm)"
+        self.default_voice = self.voice
+
+    def synthesize(self, text: str, gender: str = "male", emotion: str = "neutral") -> bytes:
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
+            tmp = tf.name
+        try:
+            res = self.synthesize_to_file(text, tmp, gender=gender, emotion=emotion)
+            if res.get("ok") and os.path.exists(tmp):
+                with open(tmp, "rb") as f:
+                    return f.read()
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+        return b""
+
+    def synthesize_to_file(self, text: str, out_path: str, gender: str = "male", emotion: str = "neutral") -> dict:
+        attempts = []
+        return _try_sherpa(text, out_path, self.cfg, None, attempts)
+
+
+class PlaceholderProvider:
+    """Synthetic speech-shaped rhythm fallback."""
+    def __init__(self, cfg=None):
+        self.cfg = cfg or {}
+        self.voice = "Placeholder"
+        self.default_voice = self.voice
+
+    def synthesize(self, text: str, gender: str = "male", emotion: str = "neutral") -> bytes:
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
+            tmp = tf.name
+        try:
+            res = self.synthesize_to_file(text, tmp, gender=gender, emotion=emotion)
+            if res.get("ok") and os.path.exists(tmp):
+                with open(tmp, "rb") as f:
+                    return f.read()
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+        return b""
+
+    def synthesize_to_file(self, text: str, out_path: str, gender: str = "male", emotion: str = "neutral") -> dict:
+        attempts = []
+        return _placeholder(text, out_path, self.cfg, attempts)
+
+
+def get_tts_provider(cfg=None):
+    """Resolve the active TTS provider: Edge-TTS first, then VITS, then placeholder."""
+    # Try Edge-TTS FIRST (most reliable)
+    try:
+        from ai_studio.engines.edge_tts_provider import EdgeTTSProvider
+        provider = EdgeTTSProvider()
+        # Quick test
+        test_audio = provider.synthesize("សាកល្បង", gender="male", emotion="neutral")
+        if len(test_audio) > 1000:  # Valid audio
+            return provider
+    except Exception as e:
+        print(f"Edge-TTS failed: {e}")
+
+    # Fallback to VITS if Edge-TTS fails
+    try:
+        cfg = cfg or {}
+        onnx, tok, _ = resolve_model(cfg)
+        if onnx and tok and (_python_api() or sherpa_bin(cfg)):
+            return VitsTTSProvider(cfg)
+    except Exception as e:
+        print(f"VITS fallback check failed: {e}")
+
+    # Last resort: placeholder
+    return PlaceholderProvider(cfg)
 
 
 def _try_sherpa(text, out_wav, cfg, progress, attempts):

@@ -159,3 +159,35 @@ def test_white_renderer_end_to_end_produces_the_photo_and_passes_qa(renderer, tm
     assert frame is not None
     assert not np.array_equal(_card(plain), _card(frame)), \
         "the rendered video shows no internet photo in the card region"
+
+
+# ------------------------------------------------------------ Edge-TTS and QA
+def test_edge_tts_provider_and_validation(tmp_path):
+    from ai_studio.engines import tts as tts_engine
+    from ai_studio.engines.edge_tts_provider import EdgeTTSProvider
+
+    provider = tts_engine.get_tts_provider()
+    assert isinstance(provider, EdgeTTSProvider)
+
+    # Test synthesis
+    raw_audio = provider.synthesize("សាកល្បង", gender="male", emotion="neutral")
+    assert len(raw_audio) > 1000
+
+    # Test file synthesis and QA validation
+    out_wav = str(tmp_path / "test_synth.wav")
+    res = provider.synthesize_to_file("សាកល្បងសំឡេងខ្មែរ", out_wav, gender="male", emotion="happy")
+    assert res["ok"] is True
+    assert os.path.exists(out_wav)
+
+    # Test QA gate audio validation
+    assert qa.validate_khmer_audio(out_wav) is True
+
+    # Short audio should fail QA validation
+    short_wav = str(tmp_path / "short.wav")
+    import wave
+    with wave.open(short_wav, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(44100)
+        wf.writeframes(b"\x00" * 100)
+    assert qa.validate_khmer_audio(short_wav) is False

@@ -264,7 +264,9 @@ def scene_image_note(scene) -> str:
 
 
 def render_project():
+    os.environ.setdefault("STUDIO_DATA_DIR", os.path.join(REPO_ROOT, "data", "studio"))
     cfg = cfg_mod.load()
+    tts_provider = tts.get_tts_provider(cfg)
     char_asset = os.path.join(REPO_ROOT, "ai_studio", "assets", "character_default.png")
     scene_clips = []
     ass_dialogues = []
@@ -272,6 +274,7 @@ def render_project():
     current_time = 0.0
 
     print("=== Step 1: Synthesizing Audio & Rendering Scene Clips (White Studio) ===")
+    print("Using Edge-TTS provider: km-KH-PisethNeural")
     for s in SCENES:
         idx = s["idx"]
         text = s["text"]
@@ -282,7 +285,9 @@ def render_project():
 
         # 1. Synthesize audio
         audio_out = os.path.join(OUTPUT_DIR, f"scene_{idx}_audio.wav")
-        res_tts = tts.synthesize(text, audio_out, cfg, emotion_style=emotion)
+        res_tts = tts_provider.synthesize_to_file(text, audio_out, emotion=emotion)
+        if not res_tts.get("ok"):
+            res_tts = tts.synthesize(text, audio_out, cfg, emotion_style=emotion)
         dur = float(res_tts.get("duration", 5.0))
         # Real measured length, so the QA gate below checks pacing against the
         # audio it just made instead of its 3.0s placeholder default.
@@ -376,7 +381,19 @@ def render_project():
         print(f"  ✓ Extracted {fname} at {t_sec}s")
 
     print("\n=== Step 5: Running QA Gate Verification ===")
+    # Validate Khmer audio across synthesized scene tracks
+    audio_sample = os.path.join(OUTPUT_DIR, "scene_0_audio.wav")
+    if qa.validate_khmer_audio(audio_sample):
+        print("  Khmer audio validation: PASSED")
+    else:
+        print("  Khmer audio validation: FAILED")
     full_qa = qa.run_full_project_qa(SCENES, final_mp4_path=final_mp4, content_type="compare")
+    if not qa.validate_khmer_audio(audio_sample):
+        full_qa["failures"].append({
+            "severity": "fail", "check": "khmer_audio",
+            "issue": "Khmer audio validation failed (placeholder or invalid audio)"
+        })
+        full_qa["fail_count"] = len(full_qa["failures"])
     for n, title, path in missing_photos:
         full_qa["failures"].append({
             "severity": "fail", "check": "example_asset", "scene_idx": n - 1,

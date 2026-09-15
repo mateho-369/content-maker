@@ -18,5 +18,6 @@ nvidia-cudnn-cu12==9.24.0.43
 uharfbuzz==0.56.1                         # Khmer shaping (coeng clusters) — required by ai_studio.captions burned captions
 khmercut==0.2.0                           # offline Khmer word segmentation for caption line wrapping
 sherpa-onnx>=1.10.0                       # offline Khmer TTS runtime (Meta MMS VITS)
+edge-tts>=6.1.0                           # Microsoft Neural TTS for Khmer (km-KH-PisethNeural)
 ffmpeg-python==0.2.0                      # FFmpeg Python bindings
 pysubs2==1.8.1                            # Advanced SubStation Alpha (ASS) manipulation
