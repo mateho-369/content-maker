@@ -16,6 +16,7 @@ uvicorn[standard]==0.52.0          # [standard] brings websockets for /api/runs/
 python-multipart==0.0.32           # UploadFile: RVC voice .zip / model imports
 numpy==2.4.4
 pillow==10.4.0                     # previz frames + thumbnails
+opencv-python-headless<5           # procedural character animations + video frame synthesis
 imageio-ffmpeg==0.6.0              # bundled ffmpeg binary when none is on PATH
 uharfbuzz==0.56.1                  # Khmer shaping: real glyph clusters + shaped pixel widths
 khmercut==0.2.0                    # offline Khmer word segmentation for line wrapping
