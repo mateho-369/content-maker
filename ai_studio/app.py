@@ -104,6 +104,15 @@ def create_app(data_root=None, enable_demo_seed=False):
     app = FastAPI(title=f"{STUDIO_NAME} — {STUDIO_TAGLINE}", version=__version__,
                   lifespan=lifespan)
 
+    from fastapi.middleware.cors import CORSMiddleware
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     class NoCacheStatic(StaticFiles):
         async def get_response(self, path, scope):
             r = await super().get_response(path, scope)
@@ -117,6 +126,9 @@ def create_app(data_root=None, enable_demo_seed=False):
     _fonts_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "fonts")
     if os.path.isdir(_fonts_dir):
         app.mount("/static/fonts", NoCacheStatic(directory=_fonts_dir), name="fonts")
+    _outputs_dir = os.path.join(ROOT, "outputs")
+    os.makedirs(_outputs_dir, exist_ok=True)
+    app.mount("/outputs", NoCacheStatic(directory=_outputs_dir), name="outputs")
     app.mount("/static", NoCacheStatic(directory=STATIC_DIR), name="static")
     app.include_router(api_mod.router)
 
@@ -130,6 +142,188 @@ def create_app(data_root=None, enable_demo_seed=False):
         with open(path, "r", encoding="utf-8") as f:
             html = f.read()
         # hashed Vite assets are cache-safe; index itself is never cached
+        return HTMLResponse(html, headers={"Cache-Control": "no-cache, must-revalidate"})
+
+    @app.get("/gallery", response_class=HTMLResponse)
+    async def gallery():
+        html = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Khmer AI Studio — Video Showcase</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #0d0f12;
+      color: #e2e8f0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans Khmer", sans-serif;
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    header {
+      text-align: center;
+      margin-bottom: 28px;
+    }
+    h1 {
+      font-size: 26px;
+      font-weight: 700;
+      background: linear-gradient(135deg, #38bdf8, #818cf8, #f472b6);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 8px;
+    }
+    p.subtitle {
+      color: #94a3b8;
+      font-size: 14px;
+    }
+    .nav-links {
+      margin-top: 12px;
+      display: flex;
+      gap: 16px;
+      justify-content: center;
+    }
+    .nav-links a {
+      color: #38bdf8;
+      text-decoration: none;
+      font-size: 13px;
+      padding: 4px 12px;
+      border: 1px solid rgba(56,189,248,0.3);
+      border-radius: 6px;
+      transition: all 0.2s;
+    }
+    .nav-links a:hover {
+      background: rgba(56,189,248,0.1);
+      border-color: #38bdf8;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+      gap: 32px;
+      max-width: 900px;
+      width: 100%;
+    }
+    .card {
+      background: #161922;
+      border: 1px solid #2d3748;
+      border-radius: 14px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+    }
+    .card-header {
+      padding: 16px 20px;
+      border-bottom: 1px solid #2d3748;
+    }
+    .badge {
+      display: inline-block;
+      font-size: 11px;
+      text-transform: uppercase;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      padding: 3px 8px;
+      border-radius: 4px;
+      margin-bottom: 6px;
+    }
+    .badge-myth { background: #854d0e; color: #fef08a; }
+    .badge-love { background: #831843; color: #fbcfe8; }
+    .card-title {
+      font-size: 17px;
+      font-weight: 600;
+      color: #f8fafc;
+      line-height: 1.4;
+    }
+    .card-desc {
+      color: #94a3b8;
+      font-size: 13px;
+      margin-top: 4px;
+    }
+    .video-wrap {
+      background: #000;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 12px;
+    }
+    video {
+      max-width: 100%;
+      height: 480px;
+      border-radius: 8px;
+      outline: none;
+      background: #000;
+    }
+    .card-footer {
+      padding: 14px 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-top: 1px solid #2d3748;
+      font-size: 12px;
+      color: #94a3b8;
+    }
+    .download-btn {
+      color: #38bdf8;
+      text-decoration: none;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>✦ Khmer AI Content Studio — Live Showcase</h1>
+    <p class="subtitle">Deterministic Vertical 9:16 Video Generation · Coeng-Safe Typography · Cute Reusable Mascot Kiri</p>
+    <div class="nav-links">
+      <a href="/">Open Studio App</a>
+      <a href="/gallery">Showcase Gallery</a>
+      <a href="/docs">FastAPI Interactive Docs</a>
+      <a href="/api/character/default/asset">View Reusable Character</a>
+    </div>
+  </header>
+
+  <main class="grid">
+    <!-- Card 1: Myth vs Fact -->
+    <div class="card">
+      <div class="card-header">
+        <span class="badge badge-myth">Format B · Myth vs Fact</span>
+        <div class="card-title">តើការផឹកទឹកកកពេលក្តៅ ធ្វើឲ្យមិនស្រួលខ្លួនពិតមែនឬ?</div>
+        <div class="card-desc">Hook → Myth → Fact → Meme Reaction → Actionable CTA</div>
+      </div>
+      <div class="video-wrap">
+        <video controls playsinline preload="metadata">
+          <source src="/outputs/myth_vs_fact/Myth_vs_Fact_Final.mp4" type="video/mp4">
+          Your browser does not support the video tag.
+        </video>
+      </div>
+      <div class="card-footer">
+        <span>33.48s · 720×1280 · H.264 / AAC</span>
+        <a class="download-btn" href="/outputs/myth_vs_fact/Myth_vs_Fact_Final.mp4" download>Download MP4 ↓</a>
+      </div>
+    </div>
+
+    <!-- Card 2: Real Love vs Situationship -->
+    <div class="card">
+      <div class="card-header">
+        <span class="badge badge-love">Format A · Compare / Relationship</span>
+        <div class="card-title">តើយើងកំពុងមាន Real Love ឬ Situationship?</div>
+        <div class="card-desc">Side A vs Side B · Meme punch-in · Summary decision</div>
+      </div>
+      <div class="video-wrap">
+        <video controls playsinline preload="metadata">
+          <source src="/outputs/real_love_vs_situationship/Real_Love_vs_Situationship_Final.mp4" type="video/mp4">
+          Your browser does not support the video tag.
+        </video>
+      </div>
+      <div class="card-footer">
+        <span>35.12s · 720×1280 · H.264 / AAC</span>
+        <a class="download-btn" href="/outputs/real_love_vs_situationship/Real_Love_vs_Situationship_Final.mp4" download>Download MP4 ↓</a>
+      </div>
+    </div>
+  </main>
+</body>
+</html>"""
         return HTMLResponse(html, headers={"Cache-Control": "no-cache, must-revalidate"})
 
     @app.get("/files/{relpath:path}")
