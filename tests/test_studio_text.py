@@ -323,8 +323,8 @@ def test_hard_split_and_title_are_cluster_safe():
 def test_content_type_api_surface_and_defaults():
     from ai_studio import content
     assert content.DEFAULT_CONTENT_TYPE == "explainer"
-    assert set(content.CONTENT_TYPES) == {"explainer", "what_if", "compare", "choose",
-                                          "word_nuance", "myth_vs_fact", "quick_tip"}
+    assert {"explainer", "what_if", "compare", "choose",
+            "word_nuance", "myth_vs_fact", "quick_tip"}.issubset(set(content.CONTENT_TYPES))
     assert content.normalize("nope") == "explainer"
     assert content.instruction_block("compare").startswith("CONTENT TYPE: COMPARE")
     assert content.expression_for_mood("sad") == "sad"

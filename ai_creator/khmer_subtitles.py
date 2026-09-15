@@ -179,9 +179,10 @@ def render_khmer_text_overlay(frame, text, font_px, color_bgr, position="bottom"
     from ai_studio.util import run_ffmpeg
     from ai_studio.media import _has_filter
 
-    if not _has_filter("subtitles"):
+    filter_name = "ass" if _has_filter("ass") else "subtitles"
+    if not (_has_filter("ass") or _has_filter("subtitles")):
         raise RuntimeError(
-            "this ffmpeg build has no libass 'subtitles' filter — cannot draw "
+            "this ffmpeg build has no libass 'ass' or 'subtitles' filter — cannot draw "
             "shaped Khmer text (install a full ffmpeg build)")
 
     def _hex_from_bgr(bgr):
@@ -217,7 +218,7 @@ def render_khmer_text_overlay(frame, text, font_px, color_bgr, position="bottom"
         ass_esc = ass_path.replace("\\", "/").replace(":", r"\:").replace("'", r"\'")
         fontsdir = cap.fonts_dir().replace("\\", "/").replace(":", r"\:").replace("'", r"\'")
         run_ffmpeg(["-i", src_png, "-vf",
-                    f"subtitles='{ass_esc}':fontsdir='{fontsdir}'",
+                    f"{filter_name}='{ass_esc}':fontsdir='{fontsdir}'",
                     "-frames:v", "1", "-y", out_png])
         out = cv2.imread(out_png)
         if out is None or out.shape[0] != h or out.shape[1] != w:

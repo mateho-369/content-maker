@@ -383,6 +383,11 @@ def deterministic_qa(scene, assets, cfg):
     amb = assets.get("ambient")
     if not (scene.get("text") or "").strip():
         issues.append({"severity": "fail", "issue": "scene has no text to speak"})
+    else:
+        from .. import qa as qa_engine
+        khmer_check = qa_engine.validate_khmer_script(scene.get("text", ""))
+        for ik in khmer_check.get("issues", []):
+            issues.append(ik)
     if audio is None:
         issues.append({"severity": "fail", "issue": "voice track missing"})
     if video is None:

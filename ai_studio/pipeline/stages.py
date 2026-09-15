@@ -139,19 +139,33 @@ def _scene_visual_source(scene, ctx):
     vs = m.get("visual_source")
     if vs:
         return vs
-    # content-type defaults (always overridable per scene, but a sensible start):
-    # compare → character_demo if a character exists, else illustration per side;
-    # word_nuance / choose options → illustration; choose takeaway stays video.
+
     ct = _content_type(ctx)
-    if ct == "compare":
-        return "character_demo" if _character_id(scene, ctx) else "illustration"
-    if ct == "word_nuance":
+
+    # 1. Emotional / Sad stories or explicit cinematic memory request: AI video shines here
+    is_cinematic_mood = scene.get("mood_tag") in ("sad", "sorrow", "cinematic", "dramatic")
+    if ct == "emotional_sad" or is_cinematic_mood:
+        return "generated_video"
+
+    # 2. Meme format / relatable reaction scenes
+    from .. import meme_engine as me
+    use_meme, meme_type, _sfx, _reason = me.decide_meme_usage(
+        ct, scene.get("text", ""), scene.get("mood_tag", ""), scene.get("idx", 0), 4, m.get("side", "")
+    )
+    if use_meme:
+        return "meme"
+
+    # 3. Normal content primarily uses reusable character + character actions
+    cid = _character_id(scene, ctx)
+    if cid:
+        return "character_action"
+
+    # 4. Structured comparison / nuances / options without character -> illustration
+    if ct in ("compare", "word_nuance", "choose", "myth_vs_fact"):
         return "illustration"
-    if ct == "choose":
-        return "illustration" if m.get("side") != "takeaway" else "generated_video"
-    if ct == "myth_vs_fact" and m.get("side") == "myth":
-        return "illustration"
-    return "generated_video"
+
+    # 5. Normal explainer / tips default to character_action if character present, else illustration
+    return "character_action" if cid else "illustration"
 
 
 def _scene_character_image(ctx, scene):
@@ -293,13 +307,20 @@ async def stage_voice_base(ctx, idx):
         return {"ok": False, "error": f"scene {idx} has no text"}
     from ..engines import tts
 
-    engine = (ctx.plan.get("tts") or {}).get("engine", "placeholder")
+    m = scene_meta(scene)
+    tts_plan = ctx.plan.get("tts") or {}
+    engine = tts_plan.get("engine", "placeholder")
+    provider = tts_plan.get("provider") or ctx.project.get("settings", {}).get("tts_provider")
+    emotion = m.get("emotion_style") or m.get("voice_emotion") or scene.get("mood_tag") or ctx.project.get("settings", {}).get("emotion_style")
+
     out = ctx.asset_path("voice", idx, ".wav")
     if os.path.exists(out) and "voice_base" not in ctx.force_stages:
         os.remove(out)
     res = await asyncio.to_thread(tts.synthesize, scene["text"], out, ctx.cfg, engine,
                                   ctx.progress_cb("voice_base", idx, 5, 92, "synthesising · "),
-                                  idx + _run_seed(ctx))
+                                  idx + _run_seed(ctx),
+                                  emotion_style=emotion,
+                                  provider_name=provider)
     if not res.get("ok"):
         return {"ok": False, "error": f"voice synthesis failed: {res.get('reason')}",
                 "engine": engine}
@@ -420,6 +441,46 @@ async def stage_video(ctx, idx):
                 "progress": 100.0,
                 "message": "scene is a talking-head shot — rendered by stage 3c",
                 "notes": [f"scene {idx + 1}: picture comes from SadTalker (stage 3c)"]}
+
+    # character action deterministic animation clip
+    if visual_source in ("character_action", "character_demo"):
+        from .. import character_actions as ca
+        out = ctx.asset_path("video", idx, ".mp4")
+        est = float(scene.get("estimated_duration_sec") or 4.0)
+        aud = float(scene.get("audio_duration") or 0)
+        target = max(1.0, aud or est)
+        m = scene_meta(scene)
+        action_name = m.get("character_action")
+        prop = m.get("prop")
+        if not action_name:
+            rec_act, rec_prp = ca.action_for_scene(
+                scene.get("mood_tag") or "", scene.get("text") or "", m.get("side", ""), _content_type(ctx)
+            )
+            action_name = action_name or rec_act
+            prop = prop or rec_prp
+
+        char_img = character_image or (character["images"][0]["image_path"] if character and character.get("images") else "")
+        w = int(ctx.project.get("settings", {}).get("width") or 720)
+        h = int(ctx.project.get("settings", {}).get("height") or 1280)
+        fps = int(ctx.project.get("settings", {}).get("fps") or 25)
+        await asyncio.to_thread(ca.render_character_action_clip, char_img, action_name, out, target, w, h, fps, prop)
+        return _video_result(ctx, idx, out, {"ok": True, "engine": f"character-action-{action_name}", "duration": target, "width": w, "height": h, "fps": fps}, "character_action", target)
+
+    # reaction meme clip
+    if visual_source in ("meme", "meme_reaction"):
+        from .. import meme_engine as me
+        out = ctx.asset_path("video", idx, ".mp4")
+        est = float(scene.get("estimated_duration_sec") or 4.0)
+        aud = float(scene.get("audio_duration") or 0)
+        target = max(1.0, aud or est)
+        m = scene_meta(scene)
+        m_type = m.get("meme_type") or "reaction_shock"
+        headline = m.get("headline") or scene.get("text") or "REACTION"
+        w = int(ctx.project.get("settings", {}).get("width") or 720)
+        h = int(ctx.project.get("settings", {}).get("height") or 1280)
+        fps = int(ctx.project.get("settings", {}).get("fps") or 25)
+        await asyncio.to_thread(me.render_meme_clip, m_type, headline, out, target, w, h, fps)
+        return _video_result(ctx, idx, out, {"ok": True, "engine": f"meme-{m_type}", "duration": target, "width": w, "height": h, "fps": fps}, "meme", target)
 
     # still-image source: Director's upload wins, then a generated illustration.
     still = None

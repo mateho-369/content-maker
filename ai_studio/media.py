@@ -585,21 +585,60 @@ def _caption_font_family(default="Khmer OS Battambang"):
 
 def burn_subtitles(video, srt, dst, force_style="FontName=Khmer OS Battambang,FontSize=15,PrimaryColour=&H00FFFFFF,OutlineColour=&HC0000000,BorderStyle=1,Outline=2,Shadow=0,MarginV=56,MarginL=28,MarginR=28,Alignment=2",
                    style="clean"):
-    """Only used when assembly.burn_captions is on and libass is available.
+    """Burn subtitles onto video.
 
-    Font choice matters here, not just cosmetically: this Windows ffmpeg
-    build's libass won't discover installed system fonts on its own (no
-    `fontsdir` = it silently falls back to *something*, and with "Noto Sans
-    Khmer" specifically that fallback doesn't shape Khmer script correctly —
-    dependent vowels and coeng-stacked consonants render unshaped, reading as
-    scrambled text even though the underlying SRT is correct). Pointing
-    fontsdir at the Windows font directory and picking a font confirmed (by
-    rendering a test frame) to shape correctly fixes it. On every platform we
-    also offer the studio's *shipped* OFL Khmer fonts first, so a fresh
-    Linux/Docker box burns real Khmer instead of tofu boxes.
+    To guarantee correct Khmer script shaping (preventing unshaped subscript
+    consonants / coeng ticks caused by FFmpeg's subtitle demuxer), we convert
+    the SRT to an ASS file and burn via burn_ass() with native libass shaping.
     """
-    if not _has_filter("subtitles"):
-        raise RuntimeError("this ffmpeg build has no 'subtitles' filter (needs libass) — "
+    try:
+        from . import captions as cap
+        from .util import media_duration, ensure_dir
+        # Parse SRT blocks if possible to use pristine ASS HarfBuzz pipeline
+        if os.path.exists(srt):
+            import re
+            srt_content = open(srt, encoding="utf-8", errors="replace").read()
+            pattern = re.compile(
+                r'(\d+)\s*\n'
+                r'(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*\n'
+                r'([\s\S]*?)(?=\n\s*\n\d+|\Z)'
+            )
+            def parse_time(ts):
+                ts = ts.replace(',', '.')
+                h, m, s = ts.split(':')
+                return int(h) * 3600 + int(m) * 60 + float(s)
+
+            blocks = []
+            for match in pattern.finditer(srt_content):
+                start = parse_time(match.group(2))
+                end = parse_time(match.group(3))
+                text = match.group(4).strip()
+                if text:
+                    blocks.append((start, end, text))
+
+            if blocks:
+                st, _ = cap.validate_style({"preset": style if style in cap.PRESETS else "clean"})
+                ass_path = dst + ".tmp.ass"
+                w, h = 720, 1280
+                try:
+                    w, h, _dur, _fps = probe_video(video)
+                except Exception:
+                    pass
+                cap.build_ass(blocks, st, w, h, ass_path)
+                try:
+                    return burn_ass(video, ass_path, dst)
+                finally:
+                    if os.path.exists(ass_path):
+                        try:
+                            os.remove(ass_path)
+                        except OSError:
+                            pass
+    except Exception:
+        pass
+
+    # Direct fallback if conversion could not proceed
+    if not (_has_filter("ass") or _has_filter("subtitles")):
+        raise RuntimeError("this ffmpeg build has no 'ass' or 'subtitles' filter (needs libass) — "
                            "keep SRT as a sidecar file instead")
     srt_esc = str(srt).replace("\\", "/").replace(":", r"\:").replace("'", r"\'")
     vf = f"subtitles='{srt_esc}'"
@@ -621,16 +660,23 @@ def burn_subtitles(video, srt, dst, force_style="FontName=Khmer OS Battambang,Fo
 
 
 def burn_ass(video, ass, dst, style="karaoke"):
-    """Burn an .ass file (karaoke ``\\k`` tags) via the same libass filter.
+    """Burn an .ass file (karaoke ``\\k`` tags) via native libass filter.
 
-    fontsdir is intentionally restricted to the studio's bundled Khmer fonts,
-    so the family named in the .ass (Noto Sans Khmer, Kantumruy Pro, …) cannot
-    silently resolve to a different system font on Windows."""
-    if not _has_filter("subtitles"):
-        raise RuntimeError("this ffmpeg build has no 'subtitles' filter (needs libass) — "
+    Uses FFmpeg's native 'ass' filter (or fallback 'subtitles'), with fontsdir
+    restricted to the studio's bundled Khmer fonts.
+    NOTE: FFmpeg's 'ass' filter passes the ASS file directly to libass without
+    passing through FFmpeg's subtitle demuxer/recode pipeline, which is
+    essential for preserving complex Khmer script shaping (such as U+17D2
+    COENG subscript consonant ligatures) via HarfBuzz.
+    """
+    has_ass = _has_filter("ass")
+    has_sub = _has_filter("subtitles")
+    if not (has_ass or has_sub):
+        raise RuntimeError("this ffmpeg build has no 'ass' or 'subtitles' filter (needs libass) — "
                            "cannot burn captions with this ffmpeg build")
+    filter_name = "ass" if has_ass else "subtitles"
     ass_esc = str(ass).replace("\\", "/").replace(":", r"\:").replace("'", r"\'")
-    vf = f"subtitles='{ass_esc}'"
+    vf = f"{filter_name}='{ass_esc}'"
     shipped = ""
     try:
         from .captions import fonts_dir

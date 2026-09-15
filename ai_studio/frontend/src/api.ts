@@ -148,6 +148,26 @@ export interface VoiceProfile {
   pth_exists?: boolean; index_exists?: boolean; sample_url?: string;
 }
 
+export interface CharacterActionMeta {
+  key: string; label: string; description: string; category: string; props: string[];
+}
+
+export interface ContentDirectorAnalysis {
+  approved: boolean; topic: string; recommended_content_type: string;
+  content_type_label: string; recommended_emotion: string;
+  recommended_character_action: string; recommended_prop: string;
+  recommended_visual_source: string; use_meme: boolean; meme_type: string;
+  meme_reasoning: string; hook_suggestion: string; retention_score: number;
+  critique: string[];
+}
+
+export interface QAResult {
+  approved: boolean; fail_count: number; warn_count: number;
+  failures: Array<{ severity: string; check: string; issue: string; scene_idx?: number }>;
+  warnings: Array<{ severity: string; check: string; issue: string; scene_idx?: number }>;
+  total_scenes: number; mp4_verified: boolean;
+}
+
 export const EMPTY_PROJECT = {} as Project;
 
 // ---------------------------------------------------------------- captions

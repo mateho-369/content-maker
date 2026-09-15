@@ -116,47 +116,283 @@ export function ProjectView({ projectId, onOpen }: { projectId: string; onOpen: 
   const deferredCount = runRows.filter((r) => r.status === "deferred").length;
   const stages = specs.length ? specs : STAGE_FALLBACK;
   const sc = proj.scenes || [];
+  const [workflowTab, setWorkflowTab] = useState<"board" | "director" | "qa">("board");
+
+  const isAuto = proj.settings?.control_mode !== "manual";
+  const toggleControlMode = async () => {
+    const nextMode = isAuto ? "manual" : "auto";
+    try {
+      await api(`/projects/${proj.id}`, {
+        method: "PATCH",
+        json: { settings: { ...proj.settings, control_mode: nextMode } },
+      });
+      toast(`Switched to ${nextMode.toUpperCase()} mode`, "ok");
+      load();
+    } catch (e) {
+      toast(errText(e), "err");
+    }
+  };
 
   return (
     <div className="pad">
       {err && <div className="errbar">⚠ {err}</div>}
       {live?.error && <div className="errbar">⚠ run error: {live.error}</div>}
       <div className="spread" style={{ marginBottom: 10 }}>
-        <h2>{proj.title}</h2>
-        <Badge kind="blue">{proj.mode === "A" ? "Director" : "Auto"}</Badge>
-        <Badge>{proj.content_type}</Badge>
-        {proj.character_id ? <Badge kind="warn">🧑 character</Badge> : null}
-        <StatusBadge status={live?.status || proj.status} />
-        <span className="spacer" />
-        <button className="btn" disabled={!!busy} onClick={() => startRun({})}>{busy === "starting" ? <Spinner /> : "▶ Run"}</button>
-        <button className="btn" disabled={!live?.run_id || !!busy}
-          onClick={() => act("pause", `/runs/${live!.run_id}/pause`)}>⏸</button>
-        <button className="btn" disabled={!live?.run_id || !!busy}
-          onClick={() => act("resume", `/runs/${live!.run_id}/resume`)}>▶</button>
-        <button className="btn" disabled={!live?.run_id || !!busy}
-          onClick={() => act("cancel", `/runs/${live!.run_id}/cancel`)}>■</button>
-        <button className="btn" disabled={!live?.run_id || !!busy}
-          onClick={() => act("continue", `/runs/${live!.run_id}/continue`)}>continue</button>
-        <span className={`dot ${liveMode ? "on" : ""}`} title={liveMode ? `live via ${liveMode}` : "offline"} />
-        <button className="btn warn" disabled={!!busy || !(deferredCount > 0)}
-          title="re-render the deferred GPU stages, then QA + assembly (voice reused)"
-          onClick={() => act("catchup", `/projects/${proj.id}/catchup`, {}, "GPU catch-up started")}>
-          🖥 GPU catch-up{(deferredCount > 0) ? ` (${deferredCount})` : ""}</button>
+        <div className="row" style={{ gap: 8, alignItems: "center" }}>
+          <h2>{proj.title}</h2>
+          <button className={`btn tiny ${isAuto ? "primary" : "warn"}`} onClick={toggleControlMode}
+            title="Toggle between AI Content Director and Manual Creator Override">
+            {isAuto ? "🤖 AUTO Director" : "🎛️ MANUAL Override"}
+          </button>
+          <Badge kind="blue">{proj.mode === "A" ? "Director" : "Auto"}</Badge>
+          <Badge>{proj.content_type}</Badge>
+          {proj.character_id ? <Badge kind="warn">🧑 character</Badge> : null}
+          <StatusBadge status={live?.status || proj.status} />
+        </div>
+        <div className="row" style={{ gap: 6 }}>
+          <button className="btn primary" disabled={!!busy} onClick={() => startRun({})}>{busy === "starting" ? <Spinner /> : "▶ Run Studio"}</button>
+          <button className="btn" disabled={!live?.run_id || !!busy}
+            onClick={() => act("pause", `/runs/${live!.run_id}/pause`)}>⏸</button>
+          <button className="btn" disabled={!live?.run_id || !!busy}
+            onClick={() => act("resume", `/runs/${live!.run_id}/resume`)}>▶</button>
+          <button className="btn" disabled={!live?.run_id || !!busy}
+            onClick={() => act("cancel", `/runs/${live!.run_id}/cancel`)}>■</button>
+          <button className="btn" disabled={!live?.run_id || !!busy}
+            onClick={() => act("continue", `/runs/${live!.run_id}/continue`)}>continue</button>
+          <span className={`dot ${liveMode ? "on" : ""}`} title={liveMode ? `live via ${liveMode}` : "offline"} />
+          <button className="btn warn" disabled={!!busy || !(deferredCount > 0)}
+            title="re-render the deferred GPU stages, then QA + assembly (voice reused)"
+            onClick={() => act("catchup", `/projects/${proj.id}/catchup`, {}, "GPU catch-up started")}>
+            🖥 GPU catch-up{(deferredCount > 0) ? ` (${deferredCount})` : ""}</button>
+        </div>
+      </div>
+
+      {/* Promax Workflow Step Tabs */}
+      <div className="tabs" style={{ marginBottom: 12 }}>
+        <button className={workflowTab === "board" ? "on" : ""} onClick={() => setWorkflowTab("board")}>
+          🎬 Storyboard & Production
+        </button>
+        <button className={workflowTab === "director" ? "on" : ""} onClick={() => setWorkflowTab("director")}>
+          🤖 Content Director & Hook Advisor
+        </button>
+        <button className={workflowTab === "qa" ? "on" : ""} onClick={() => setWorkflowTab("qa")}>
+          🛡️ Automated QA Gate
+        </button>
       </div>
 
       <div className="split wide-right" style={{ gridTemplateColumns: "minmax(0,1fr) 430px" }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <PipelineDAG stages={stages} rows={runRows} onStage={(k) => setSelStage(k)} />
-          <CaptionStudio projectId={proj.id} initial={capStyle} onChanged={load} />
-          <SceneBoard proj={proj} scenes={sc} rows={runRows} assets={assets} sel={selScene}
-            onSel={setSelScene} onChanged={load} act={act} busy={busy} />
-          <ScriptPanel proj={proj} onChanged={load} act={act} busy={busy} />
-          <EventLog log={log} rows={runRows} />
+          {workflowTab === "director" && (
+            <ContentDirectorPanel proj={proj} scenes={sc} onChanged={load} />
+          )}
+          {workflowTab === "qa" && (
+            <QAGatePanel proj={proj} scenes={sc} assets={assets} />
+          )}
+          {workflowTab === "board" && (
+            <>
+              <PipelineDAG stages={stages} rows={runRows} onStage={(k) => setSelStage(k)} />
+              <CaptionStudio projectId={proj.id} initial={capStyle} onChanged={load} />
+              <SceneBoard proj={proj} scenes={sc} rows={runRows} assets={assets} sel={selScene}
+                onSel={setSelScene} onChanged={load} act={act} busy={busy} />
+              <ScriptPanel proj={proj} onChanged={load} act={act} busy={busy} />
+              <EventLog log={log} rows={runRows} />
+            </>
+          )}
         </div>
         <Inspector proj={proj} scenes={sc} stage={selStage} scene={selScene} assets={assets}
           rows={runRows} onChanged={load} act={act} busy={busy} specs={stages} />
       </div>
     </div>
+  );
+}
+
+const ACTIONS = [
+  "talking", "pointing", "surprised", "happy", "sad", "thinking", "confused",
+  "laughing", "crying", "shocked", "walking", "sitting", "reacting",
+  "celebrating", "frustrated", "explaining", "holding_phone", "holding_coffee",
+  "holding_book", "holding_money", "holding_shield"
+];
+
+const PROPS = ["none", "phone", "coffee", "book", "money", "shield", "microphone", "sparkles"];
+
+const EMOTIONS = [
+  "calm", "soft", "strong", "happy", "sad", "serious", "excited", "surprised", "storytelling", "emotional"
+];
+
+const MEMES = [
+  "reaction_shock", "reaction_laugh", "reaction_crying", "reaction_mindblown", "reaction_facepalm", "meme_dramatic_zoom"
+];
+
+function ContentDirectorPanel({ proj, scenes, onChanged }: { proj: Project; scenes: Scene[]; onChanged: () => void }) {
+  const [analysis, setAnalysis] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
+  const toast = useToast();
+
+  const analyze = async () => {
+    setLoading(true);
+    try {
+      const res = await api<any>("/content-director/analyze", {
+        method: "POST",
+        json: { topic: proj.topic_hint || proj.title, script: proj.script },
+      });
+      setAnalysis(res);
+      toast("Content Director evaluation complete", "ok");
+    } catch (e) {
+      toast(errText(e), "err");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { analyze(); }, [proj.id]);
+
+  return (
+    <Panel title="Content Director Intelligence & Viral Hooks" right={
+      <button className="btn tiny primary" onClick={analyze} disabled={loading}>
+        {loading ? "Analyzing…" : "🤖 Refresh Analysis"}
+      </button>
+    }>
+      <div className="panel-b">
+        {analysis ? (
+          <div>
+            <div className="spread" style={{ marginBottom: 12 }}>
+              <div>
+                <b>Director Recommendation: </b>
+                <Badge kind={analysis.approved ? "ok" : "warn"}>
+                  {analysis.approved ? `Retention Rating: ${analysis.retention_score}/100` : "Needs Polish"}
+                </Badge>
+              </div>
+              <div className="hint">Optimal Format: <b>{analysis.content_type_label}</b></div>
+            </div>
+
+            <div className="cards" style={{ gridTemplateColumns: "1fr 1fr", marginBottom: 12 }}>
+              <div className="ct-card">
+                <b>🎯 1-3s Viral Hook Suggestion</b>
+                <p lang="km" style={{ marginTop: 6, fontSize: 13, color: "var(--tx)", lineHeight: 1.5 }}>
+                  {analysis.hook_suggestion}
+                </p>
+              </div>
+              <div className="ct-card">
+                <b>🎭 Recommended Action & Emotion</b>
+                <div style={{ marginTop: 6, fontSize: 12 }}>
+                  <div><b>Character Action:</b> {analysis.recommended_character_action} {analysis.recommended_prop !== "none" ? `(Prop: ${analysis.recommended_prop})` : ""}</div>
+                  <div><b>Voice Emotion:</b> {analysis.recommended_emotion}</div>
+                  <div><b>Visual Default:</b> {analysis.recommended_visual_source}</div>
+                  <div><b>Meme Moment:</b> {analysis.use_meme ? `Yes (${analysis.meme_type})` : "No"}</div>
+                </div>
+              </div>
+            </div>
+
+            {analysis.use_meme && (
+              <div style={{ background: "#1c2128", border: "1px solid #30363d", borderRadius: 4, padding: 8, marginBottom: 8, fontSize: 12 }}>
+                <b>⚡ Meme Reasoning:</b> {analysis.meme_reasoning}
+              </div>
+            )}
+
+            {analysis.critique.length > 0 && (
+              <div className="errbar" style={{ background: "#2e2a1d", color: "var(--yellow)" }}>
+                <b>Director Critique:</b> {analysis.critique.join(" ")}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="hint">Evaluating project topic and script structure…</div>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
+function QAGatePanel({ proj, scenes, assets }: { proj: Project; scenes: Scene[]; assets: Asset[] }) {
+  const [qaRes, setQaRes] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
+  const toast = useToast();
+
+  const runQA = async () => {
+    setLoading(true);
+    try {
+      const res = await api<any>(`/qa/project/${proj.id}`);
+      setQaRes(res);
+      toast(res.approved ? "QA Gate Passed: Ready to Ship!" : "QA Gate flagged issues", res.approved ? "ok" : "warn");
+    } catch (e) {
+      toast(errText(e), "err");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { runQA(); }, [proj.id]);
+
+  return (
+    <Panel title="Automated QA Gate · Pre-Delivery Compliance" right={
+      <button className="btn tiny primary" onClick={runQA} disabled={loading}>
+        {loading ? "Auditing…" : "🛡️ Run Full QA Audit"}
+      </button>
+    }>
+      <div className="panel-b">
+        {qaRes ? (
+          <div>
+            <div className="spread" style={{ marginBottom: 12 }}>
+              <div>
+                <b>Gate Status: </b>
+                <Badge kind={qaRes.approved ? "ok" : "err"}>
+                  {qaRes.approved ? "✅ APPROVED FOR EXPORT" : "❌ ISSUES DETECTED"}
+                </Badge>
+              </div>
+              <div className="hint">
+                {qaRes.total_scenes} scenes · {qaRes.fail_count} failures · {qaRes.warn_count} warnings
+              </div>
+            </div>
+
+            {/* Checklist */}
+            <div className="cards" style={{ gridTemplateColumns: "repeat(3, 1fr)", marginBottom: 14 }}>
+              <div className="ct-card">
+                <b>1. Khmer Typography & Subscripts</b>
+                <div style={{ marginTop: 4, color: qaRes.failures.some((f: any) => f.check === "khmer_clusters") ? "var(--red)" : "var(--green)" }}>
+                  {qaRes.failures.some((f: any) => f.check === "khmer_clusters") ? "❌ Broken Consonant Cluster" : "✓ Subscripts & HarfBuzz Normalization Valid"}
+                </div>
+              </div>
+              <div className="ct-card">
+                <b>2. Script & Viral Hook</b>
+                <div style={{ marginTop: 4, color: qaRes.warnings.some((w: any) => w.check === "hook_pacing") ? "var(--yellow)" : "var(--green)" }}>
+                  {qaRes.warnings.some((w: any) => w.check === "hook_pacing") ? "⚠️ Scene 1 Hook Needs Tightening" : "✓ 1-3s Hook Optimized"}
+                </div>
+              </div>
+              <div className="ct-card">
+                <b>3. Final MP4 Container</b>
+                <div style={{ marginTop: 4, color: qaRes.mp4_verified ? "var(--green)" : "var(--tx2)" }}>
+                  {qaRes.mp4_verified ? "✓ 9:16 Vertical Video Valid" : "○ Export Pending"}
+                </div>
+              </div>
+            </div>
+
+            {qaRes.failures.length > 0 && (
+              <div className="errbar" style={{ marginBottom: 8 }}>
+                <b>Failures:</b>
+                <ul style={{ margin: "4px 0 0 16px", padding: 0 }}>
+                  {qaRes.failures.map((f: any, idx: number) => (
+                    <li key={idx}>[{f.check}] Scene {f.scene_idx !== undefined ? f.scene_idx + 1 : "General"}: {f.issue}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {qaRes.warnings.length > 0 && (
+              <div style={{ background: "#2e2a1d", border: "1px solid #665020", borderRadius: 4, padding: 8, color: "var(--yellow)" }}>
+                <b>Warnings:</b>
+                <ul style={{ margin: "4px 0 0 16px", padding: 0 }}>
+                  {qaRes.warnings.map((w: any, idx: number) => (
+                    <li key={idx}>[{w.check}] Scene {w.scene_idx !== undefined ? w.scene_idx + 1 : "General"}: {w.issue}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="hint">Click "Run Full QA Audit" to verify all script clusters, voice loudness, and video assets.</div>
+        )}
+      </div>
+    </Panel>
   );
 }
 
@@ -256,52 +492,82 @@ function SceneBoard({ proj, scenes, rows, assets, sel, onSel, onChanged, act, bu
     <Panel title={`Scene board (${scenes.length})`}
       right={<button className="btn tiny primary" onClick={save} disabled={busy === "board"}>save board</button>}>
       <table className="grid">
-        <thead><tr><th style={{ width: 30 }}>#</th><th>text</th><th style={{ width: 140 }}>visual</th>
-          <th style={{width: 110}}>mood</th><th style={{ width: 80 }}>⏱</th><th style={{ width: 120 }}>production</th></tr></thead>
+        <thead>
+          <tr>
+            <th style={{ width: 25 }}>#</th>
+            <th>narration</th>
+            <th style={{ width: 140 }}>action & prop</th>
+            <th style={{ width: 110 }}>emotion</th>
+            <th style={{ width: 130 }}>visual source</th>
+            <th style={{ width: 60 }}>⏱</th>
+            <th style={{ width: 110 }}>production</th>
+          </tr>
+        </thead>
         <tbody>
           {grouped.map((g, gi) => (
             <React.Fragment key={gi}>
-              {g.label && <tr className="group-head"><td colSpan={6}>{g.label}</td></tr>}
+              {g.label && <tr className="group-head"><td colSpan={7}>{g.label}</td></tr>}
               {g.items.map((s, i) => {
-            const done = stageFor(i, "video_fit")?.status === "done";
-            return (
-              <tr key={i} onClick={() => onSel(i)} style={{ cursor: "pointer", background: sel === i ? "#242a35" : undefined }}>
-                <td><b>{i + 1}</b>{s.meta?.side ? <><br /><Badge>{s.meta.side}</Badge></> : null}</td>
-                <td>
-                  <textarea className="scene-text" lang="km" spellCheck={false} value={s.text} rows={2}
-                    onChange={(e) => setDraft(draft.map((x, j) => j === i ? { ...x, text: e.target.value } : x))} />
-                  {s.meta?.character_id ? <div className="hint">🧑 {s.meta.character_id.slice(0, 10)}</div> : null}
-                </td>
-                <td className="hint" style={{ fontSize: 11 }}>{s.visual_prompt?.slice(0, 90) || "—"}</td>
-                <td><Badge>{s.mood_tag || "—"}</Badge></td>
-                <td className="mono">{fmtDur(s.estimated_duration_sec)}</td>
-                <td>
-                  <VisualSourceControl value={s.meta?.visual_source || ""} hasChar={!!proj.character_id || !!s.meta?.character_id}
-                    onChange={(v) => patchScene(i, { visual_source: v })} />
-                  {hasChar(proj, s) && (
-                    <div className="row" style={{ marginTop: 4 }}>
-                      <label className="hint">render:</label>
-                      <select value={s.meta?.render_mode || "broll"} style={{ width: "auto", padding: "2px 6px", fontSize: 11 }}
-                        onChange={(e) => patchScene(i, { render_mode: e.target.value })}>
-                        <option value="broll">b-roll</option><option value="talking_head">talking head</option>
+                const vs = s.meta?.visual_source || (hasChar(proj, s) ? "character_action" : "illustration");
+                return (
+                  <tr key={i} onClick={() => onSel(i)} style={{ cursor: "pointer", background: sel === i ? "#242a35" : undefined }}>
+                    <td><b>{i + 1}</b>{s.meta?.side ? <><br /><Badge>{s.meta.side}</Badge></> : null}</td>
+                    <td>
+                      <textarea className="scene-text" lang="km" spellCheck={false} value={s.text} rows={2}
+                        onChange={(e) => setDraft(draft.map((x, j) => j === i ? { ...x, text: e.target.value } : x))} />
+                      {s.meta?.character_id ? <div className="hint">🧑 {s.meta.character_id.slice(0, 10)}</div> : null}
+                    </td>
+                    <td>
+                      <select value={s.meta?.character_action || "talking"} style={{ width: "100%", padding: "2px 4px", fontSize: 11 }}
+                        onChange={(e) => patchScene(i, { character_action: e.target.value })}>
+                        {ACTIONS.map((a) => <option key={a} value={a}>🎭 {a}</option>)}
                       </select>
-                    </div>
-                  )}
-                  <div className="row" style={{ marginTop: 4 }}>
-                    <input type="file" accept="image/*" style={{ display: "none" }} id={`img-${i}`}
-                      onChange={(e) => e.target.files?.[0] && uploadImage(i, e.target.files[0])} />
-                    <button className="btn tiny" onClick={() => document.getElementById(`img-${i}`)?.click()}>⬆ image</button>
-                    <a className="btn tiny" href={`/api/projects/${proj.id}/scene/${i}/download`}>zip</a>
-                  </div>
-                  <div className="hint" style={{ marginTop: 3 }}>
-                    {["voice_final", "video", "video_fit", "ambient"].map((k) => {
-                      const r = stageFor(i, k);
-                      return r ? <span key={k}>{k.replace("_final", "").replace("_fit", "")}:{r.status[0]} </span> : null;
-                    })}
-                  </div>
-                </td>
-              </tr>
-            );
+                      <select value={s.meta?.prop || "none"} style={{ width: "100%", padding: "2px 4px", fontSize: 11, marginTop: 3 }}
+                        onChange={(e) => patchScene(i, { prop: e.target.value })}>
+                        {PROPS.map((p) => <option key={p} value={p}>📦 {p}</option>)}
+                      </select>
+                    </td>
+                    <td>
+                      <select value={s.meta?.emotion_style || s.mood_tag || "calm"} style={{ width: "100%", padding: "2px 4px", fontSize: 11 }}
+                        onChange={(e) => patchScene(i, { emotion_style: e.target.value })}>
+                        {EMOTIONS.map((em) => <option key={em} value={em}>🎙️ {em}</option>)}
+                      </select>
+                    </td>
+                    <td>
+                      <VisualSourceControl value={vs} hasChar={hasChar(proj, s)}
+                        onChange={(v) => patchScene(i, { visual_source: v })} />
+                      {vs === "meme" && (
+                        <select value={s.meta?.meme_type || "reaction_shock"} style={{ width: "100%", padding: "2px 4px", fontSize: 11, marginTop: 3 }}
+                          onChange={(e) => patchScene(i, { meme_type: e.target.value })}>
+                          {MEMES.map((m) => <option key={m} value={m}>⚡ {m.replace("reaction_", "")}</option>)}
+                        </select>
+                      )}
+                    </td>
+                    <td className="mono">{fmtDur(s.estimated_duration_sec)}</td>
+                    <td>
+                      {hasChar(proj, s) && (
+                        <div className="row" style={{ marginBottom: 3 }}>
+                          <select value={s.meta?.render_mode || "broll"} style={{ width: "100%", padding: "2px 4px", fontSize: 11 }}
+                            onChange={(e) => patchScene(i, { render_mode: e.target.value })}>
+                            <option value="broll">b-roll</option><option value="talking_head">talking head</option>
+                          </select>
+                        </div>
+                      )}
+                      <div className="row" style={{ gap: 4 }}>
+                        <input type="file" accept="image/*" style={{ display: "none" }} id={`img-${i}`}
+                          onChange={(e) => e.target.files?.[0] && uploadImage(i, e.target.files[0])} />
+                        <button className="btn tiny" onClick={() => document.getElementById(`img-${i}`)?.click()}>⬆ img</button>
+                        <a className="btn tiny" href={`/api/projects/${proj.id}/scene/${i}/download`}>zip</a>
+                      </div>
+                      <div className="hint" style={{ marginTop: 3, fontSize: 10 }}>
+                        {["voice_final", "video", "video_fit", "ambient"].map((k) => {
+                          const r = stageFor(i, k);
+                          return r ? <span key={k}>{k.replace("_final", "").replace("_fit", "")}:{r.status[0]} </span> : null;
+                        })}
+                      </div>
+                    </td>
+                  </tr>
+                );
               })}
             </React.Fragment>
           ))}
@@ -317,12 +583,13 @@ export function VisualSourceControl({ value, hasChar, onChange }: {
   value: string; hasChar: boolean; onChange: (v: string) => void;
 }) {
   const opts = [
-    ["generated_video", "🎞 video"],
+    ["character_action", "🎭 character action"],
     ["illustration", "🖼 illustration"],
+    ["meme", "⚡ meme / reaction"],
+    ["generated_video", "🎞 AI video (optional)"],
   ] as const;
-  if (hasChar) opts.push(["character_demo", "🧑 gesture demo"] as const);
   return (
-    <select value={value || "generated_video"} style={{ width: "auto", padding: "2px 6px", fontSize: 11 }}
+    <select value={value || (hasChar ? "character_action" : "illustration")} style={{ width: "auto", padding: "2px 6px", fontSize: 11 }}
       onChange={(e) => onChange(e.target.value)}>
       {opts.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
     </select>

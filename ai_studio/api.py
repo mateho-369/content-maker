@@ -1434,6 +1434,48 @@ async def api_content_types():
     return {"types": content_mod.content_type_payload()}
 
 
+# ============================================================ Content Director & Creative Tools
+@router.post("/content-director/analyze")
+async def api_content_director_analyze(payload: dict = Body(...)):
+    topic = payload.get("topic") or ""
+    script = payload.get("script") or ""
+    res = content_mod.ContentDirector.analyze_topic(topic, script)
+    return res
+
+
+@router.get("/character-actions")
+async def api_character_actions():
+    from . import character_actions as ca
+    return {
+        "actions": ca.list_actions(),
+        "props": ca.list_props(),
+    }
+
+
+@router.get("/tts/providers-and-styles")
+async def api_tts_providers_and_styles():
+    st = get_state()
+    from . import tts_providers as tp
+    return {
+        "providers": tp.list_providers(st.cfg if st else {}),
+        "emotional_styles": tp.list_emotional_styles(),
+    }
+
+
+@router.get("/qa/project/{project_id}")
+async def api_qa_project(project_id: str):
+    st = get_state()
+    scenes = st.db.list_scenes(project_id)
+    if not scenes:
+        raise HTTPException(status_code=404, detail="Project or scenes not found")
+
+    from . import qa as qa_engine
+    final_mp4 = st.final_video(project_id) if hasattr(st, "final_video") else None
+    ct = st.db.get_project(project_id).get("settings", {}).get("content_type", "explainer")
+    res = qa_engine.run_full_project_qa(scenes, final_mp4, content_type=ct)
+    return res
+
+
 # ============================================================ style previews
 @router.get("/style-previews")
 async def api_style_previews(refresh: bool = Query(False)):

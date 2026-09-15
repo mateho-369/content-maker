@@ -159,7 +159,7 @@ def _sherpa_tts(cfg, model_onnx, tokens, model_dir):
 
 
 # ------------------------------------------------------------------ synthesis
-def synthesize(text, out_wav, cfg, engine="auto", progress=None, seed=0):
+def synthesize(text, out_wav, cfg, engine="auto", progress=None, seed=0, emotion=None, emotion_style=None, provider_name=None):
     """Speak `text` into `out_wav`. Returns a result dict (never raises)."""
     cfg_t = cfg.get("tts", {})
     # [[silent: …]] spans are display-only: the words are never spoken
@@ -168,6 +168,30 @@ def synthesize(text, out_wav, cfg, engine="auto", progress=None, seed=0):
     if not text:
         return {"ok": False, "reason": "empty text (all silent markup)", "engine": "none"}
     ensure_dir(os.path.dirname(out_wav) or ".")
+
+    target_emotion = emotion or emotion_style or cfg_t.get("emotion") or cfg.get("pipeline", {}).get("emotion") or "calm"
+    target_speed = float(cfg_t.get("speed", 1.0))
+    provider_id = provider_name or (engine if engine in ("sherpa", "huggingface", "placeholder", "local_sherpa") else cfg_t.get("provider", "auto"))
+
+    # Use unified provider architecture with emotional post-processing
+    try:
+        from .. import tts_providers as tp
+        res = tp.synthesize_speech(
+            text=text,
+            out_wav=out_wav,
+            cfg=cfg,
+            provider_id=("local_sherpa" if provider_id == "sherpa" else provider_id),
+            emotion=target_emotion,
+            speed=target_speed,
+            progress=progress
+        )
+        if res.get("ok"):
+            res.setdefault("chunks", 1)
+            return res
+    except Exception as e:
+        pass
+
+    # Direct fallback chain if provider call raised unexpectedly
     want = engine if engine in ("sherpa", "piper", "kokoro", "placeholder") else "auto"
     chain = (["sherpa", "piper", "kokoro", "placeholder"] if want == "auto" else [want, "placeholder"])
     attempts = []
@@ -424,7 +448,13 @@ def probe(cfg):
         est = os.path.getsize(onnx) if onnx else None
     except Exception:
         pass
+
+    from .. import tts_providers as tp
+    provs = tp.list_providers(cfg)
+
     return {"engines": eng, "model_dir": d, "model": onnx, "tokens": tokens,
             "model_bytes": est, "sherpa_cli": sherpa_bin(cfg),
+            "providers": provs,
+            "emotional_styles": list(tp.EMOTIONAL_STYLES.keys()),
             "ready": bool(eng["sherpa_model"] and (eng["sherpa_python"] or eng["sherpa_cli"])),
             "fallback": "placeholder" if not eng["sherpa_model"] else "none"}
