@@ -8,6 +8,7 @@ nothing outside <data_dir> (default `data/studio/`) — so the whole studio can 
 moved or backed up by copying that folder.
 """
 import asyncio
+import errno
 import os
 import shutil
 import threading
@@ -25,6 +26,89 @@ from .pipeline.scheduler import Scheduler
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+
+# Windows asyncio logs a full traceback every time a browser aborts a video
+# range request (seeking, tab close, a <video> prefetch it decides it does not
+# need): `_ProactorBasePipeTransport._call_connection_lost` raises
+# ConnectionResetError [WinError 10054] from inside a callback, and the loop
+# prints it. Nothing failed — the studio kept serving — so a /gallery page with
+# three <video> tags could bury the real log under these.
+_BENIGN_DISCONNECT_ERRNOS = frozenset(filter(None, (
+    getattr(errno, "ECONNRESET", None),      # WinError 10054
+    getattr(errno, "ECONNABORTED", None),     # WinError 10053
+    getattr(errno, "EPIPE", None),
+    getattr(errno, "ENOTCONN", None),
+)))
+_BENIGN_DISCONNECT_MARKERS = ("10053", "10054", "forcibly closed by the remote host",
+                              "connection was aborted", "broken pipe")
+_quieted_disconnects = 0
+
+
+def _is_benign_client_disconnect(context) -> bool:
+    """True when a loop exception context is just a client hanging up.
+
+    Matches both shapes Windows produces: a real ConnectionResetError raised by
+    the proactor transport, and the same failure wrapped in a plain
+    RuntimeError("[WinError 10054] ...") by the callback machinery.
+    """
+    exc = context.get("exception")
+    if isinstance(exc, ConnectionError):        # reset / aborted / broken pipe
+        return True
+    if isinstance(exc, OSError) and exc.errno in _BENIGN_DISCONNECT_ERRNOS:
+        return True
+    text = f"{exc!r} {context.get('message', '')}".lower()
+    return any(marker in text for marker in _BENIGN_DISCONNECT_MARKERS)
+
+
+def quiet_windows_connection_resets(loop=None):
+    """Stop logging harmless client disconnects as asyncio errors.
+
+    Safe to call more than once: a handler is only installed when the loop is
+    still on the default one.
+    """
+    loop = loop or asyncio.get_event_loop_policy().new_event_loop()
+    default_handler = loop.get_exception_handler()
+    if default_handler is not None:                        # already patched
+        return loop
+
+    def handler(_loop, context):
+        global _quieted_disconnects
+        if _is_benign_client_disconnect(context):
+            _quieted_disconnects += 1
+            return
+        _loop.default_exception_handler(context)
+
+    loop.set_exception_handler(handler)
+    return loop
+
+
+# probed runtime for the gallery footers: (mtime, label)
+_gallery_runtime_cache = {}
+
+
+def gallery_footer_label(rel_path, specs="720×1280 · H.264 / AAC"):
+    """Footer text for one gallery card: real probed runtime + codec specs.
+
+    The runtime is read from the rendered MP4 (cached per mtime) instead of
+    being hardcoded, so the card can never claim a length the file does not
+    have after a re-render. Missing file / no ffmpeg → just the specs.
+    """
+    path = os.path.join(ROOT, "outputs", *rel_path.split("/"))
+    label = "—"
+    try:
+        mtime = os.path.getmtime(path)
+        cached = _gallery_runtime_cache.get(path)
+        if cached and cached[0] == mtime:
+            label = cached[1]
+        else:
+            from .util import media_duration
+
+            dur = media_duration(path, 0.0)
+            label = f"{dur:.2f}s" if dur and dur > 0 else "—"
+            _gallery_runtime_cache[path] = (mtime, label)
+    except OSError:
+        label = "—"
+    return f"{label} · {specs}"
 
 
 class StudioState:
@@ -90,7 +174,10 @@ def create_app(data_root=None, enable_demo_seed=False):
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        st.bus.bind_loop(asyncio.get_running_loop())
+        loop = asyncio.get_running_loop()
+        # covers `uvicorn ai_studio.app:app` (no __main__ involved)
+        quiet_windows_connection_resets(loop)
+        st.bus.bind_loop(loop)
         if enable_demo_seed:
             try:
                 from .demo import seed_demo_projects
@@ -292,13 +379,13 @@ def create_app(data_root=None, enable_demo_seed=False):
         <div class="card-desc">Internet Photos · Mascot Actions (Thinking/Point/Meme/CTA) · Coeng Subtitles · Free Khmer Voice</div>
       </div>
       <div class="video-wrap" style="background: #f8fafc;">
-        <video controls playsinline preload="metadata">
+        <video controls playsinline preload="none">
           <source src="/outputs/love_vs_situationship_white/Love_vs_Situationship_White_Final.mp4" type="video/mp4">
           Your browser does not support the video tag.
         </video>
       </div>
       <div class="card-footer">
-        <span>38.41s · 720×1280 · H.264 / AAC</span>
+        <span>__RUNTIME_WHITE__</span>
         <a class="download-btn" href="/outputs/love_vs_situationship_white/Love_vs_Situationship_White_Final.mp4" download>Download MP4 ↓</a>
       </div>
     </div>
@@ -311,13 +398,13 @@ def create_app(data_root=None, enable_demo_seed=False):
         <div class="card-desc">Hook → Myth → Fact → Meme Reaction → Actionable CTA</div>
       </div>
       <div class="video-wrap">
-        <video controls playsinline preload="metadata">
+        <video controls playsinline preload="none">
           <source src="/outputs/myth_vs_fact/Myth_vs_Fact_Final.mp4" type="video/mp4">
           Your browser does not support the video tag.
         </video>
       </div>
       <div class="card-footer">
-        <span>33.48s · 720×1280 · H.264 / AAC</span>
+        <span>__RUNTIME_MYTH__</span>
         <a class="download-btn" href="/outputs/myth_vs_fact/Myth_vs_Fact_Final.mp4" download>Download MP4 ↓</a>
       </div>
     </div>
@@ -330,19 +417,28 @@ def create_app(data_root=None, enable_demo_seed=False):
         <div class="card-desc">Side A vs Side B · Meme punch-in · Summary decision</div>
       </div>
       <div class="video-wrap">
-        <video controls playsinline preload="metadata">
+        <video controls playsinline preload="none">
           <source src="/outputs/real_love_vs_situationship/Real_Love_vs_Situationship_Final.mp4" type="video/mp4">
           Your browser does not support the video tag.
         </video>
       </div>
       <div class="card-footer">
-        <span>35.12s · 720×1280 · H.264 / AAC</span>
+        <span>__RUNTIME_LOVE__</span>
         <a class="download-btn" href="/outputs/real_love_vs_situationship/Real_Love_vs_Situationship_Final.mp4" download>Download MP4 ↓</a>
       </div>
     </div>
   </main>
 </body>
 </html>"""
+        # Runtime is probed from the rendered MP4s at request time (cached per
+        # mtime), so the footer never advertises a length the file does not have.
+        html = (html
+                .replace("__RUNTIME_WHITE__", gallery_footer_label(
+                    "love_vs_situationship_white/Love_vs_Situationship_White_Final.mp4"))
+                .replace("__RUNTIME_MYTH__", gallery_footer_label(
+                    "myth_vs_fact/Myth_vs_Fact_Final.mp4"))
+                .replace("__RUNTIME_LOVE__", gallery_footer_label(
+                    "real_love_vs_situationship/Real_Love_vs_Situationship_Final.mp4")))
         return HTMLResponse(html, headers={"Cache-Control": "no-cache, must-revalidate"})
 
     @app.get("/files/{relpath:path}")
