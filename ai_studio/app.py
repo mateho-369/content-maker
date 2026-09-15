@@ -293,13 +293,13 @@ def create_app(data_root=None, enable_demo_seed=False):
       </div>
       <div class="video-wrap" style="background: #f8fafc;">
         <video controls playsinline preload="metadata">
-          <source src="/outputs/love_vs_situationship_white_bg/Love_vs_Situationship_WhiteBG.mp4" type="video/mp4">
+          <source src="/outputs/love_vs_situationship_white/Love_vs_Situationship_White_Final.mp4" type="video/mp4">
           Your browser does not support the video tag.
         </video>
       </div>
       <div class="card-footer">
         <span>38.41s · 720×1280 · H.264 / AAC</span>
-        <a class="download-btn" href="/outputs/love_vs_situationship_white_bg/Love_vs_Situationship_WhiteBG.mp4" download>Download MP4 ↓</a>
+        <a class="download-btn" href="/outputs/love_vs_situationship_white/Love_vs_Situationship_White_Final.mp4" download>Download MP4 ↓</a>
       </div>
     </div>
 

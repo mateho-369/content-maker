@@ -95,6 +95,52 @@ def _python_api():
         return False
 
 
+def voice_status(cfg):
+    """Lightweight voice-installation status for the web UI badge.
+
+    The UI needs to tell at a glance whether the real Meta MMS VITS Khmer
+    voice is installed (``2_SETUP_KHMER_TTS.bat`` drops ``model.onnx`` +
+    ``tokens.txt`` into the configured TTS model dir) or whether renders use
+    the speech-shaped placeholder voice. This is a filesystem probe only — no
+    sherpa import, no model load — so ``/api/status`` can poll it every few
+    seconds. The badge itself is green whenever ``model.onnx`` is present,
+    matching what the setup script guarantees; ``ready`` additionally requires
+    tokens.txt and a usable sherpa runtime.
+    """
+    from ..config import find_model_onnx, sherpa_model_dir
+
+    d = sherpa_model_dir(cfg)
+    onnx = find_model_onnx(d) if d and os.path.isdir(d) else None
+    tokens_path = os.path.join(d, "tokens.txt") if d else None
+    tokens_present = bool(tokens_path and os.path.exists(tokens_path))
+    model_bytes = None
+    if onnx:
+        try:
+            model_bytes = os.path.getsize(onnx)
+        except OSError:
+            model_bytes = None
+    native = bool(onnx)
+    runtime_python = _python_api()
+    runtime_cli = bool(sherpa_bin(cfg))
+    return {
+        # The single flag the green/yellow UI badge keys on.
+        "native_voice": native,
+        "placeholder_active": not native,
+        "engine": "sherpa" if native else "placeholder",
+        "model": onnx,
+        "model_present": native,
+        "model_bytes": model_bytes,
+        "tokens_present": tokens_present,
+        "model_dir": d,
+        # Fully usable = model artefacts + a sherpa runtime (python API or CLI).
+        "runtime_python": runtime_python,
+        "runtime_cli": runtime_cli,
+        "ready": bool(native and tokens_present and (runtime_python or runtime_cli)),
+        "setup_script": "2_SETUP_KHMER_TTS.bat",
+        "render_script": "3_RENDER_ALL_VIDEOS.bat",
+    }
+
+
 _engine_cache = {}
 
 

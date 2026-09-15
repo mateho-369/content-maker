@@ -117,10 +117,28 @@ export interface StageSpec {
   deferrable: boolean;
 }
 
+export interface TtsVoiceStatus {
+  /** model.onnx present → the real Meta MMS VITS Khmer voice is installed */
+  native_voice: boolean;
+  placeholder_active: boolean;
+  engine: "sherpa" | "placeholder" | string;
+  model: string | null;
+  model_present: boolean;
+  model_bytes: number | null;
+  tokens_present: boolean;
+  model_dir: string | null;
+  runtime_python: boolean;
+  runtime_cli: boolean;
+  /** model + tokens + a usable sherpa runtime */
+  ready: boolean;
+  setup_script: string;
+  render_script: string;
+}
+
 export interface StatusPayload {
   studio: string; version: string; data_dir: string; db: Record<string, any>;
   machine: any; plan: Record<string, any>; capabilities: Record<string, any>;
-  vram: any; active_runs: string[]; ffmpeg: string;
+  vram: any; tts?: TtsVoiceStatus; active_runs: string[]; ffmpeg: string;
 }
 
 export interface ContentTypeMeta {

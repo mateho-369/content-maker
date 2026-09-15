@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { api, ContentTypeMeta, Project, ProjectRow, StatusPayload, VoiceProfile } from "../api";
 import { useToast, errText } from "../main";
-import { Badge, Bar, Empty, Panel, StatusBadge, fmtTime, Spinner } from "../ui";
+import { Badge, Bar, Empty, Panel, StatusBadge, TtsVoiceBadge, fmtTime, Spinner } from "../ui";
 import { Wizard } from "./Wizard";
 
 export function ProjectsView({ status, onOpen }: {
@@ -43,6 +43,7 @@ export function ProjectsView({ status, onOpen }: {
 
   return (
     <div className="pad">
+      <TtsVoiceBadge status={status} variant="banner" />
       <div className="spread" style={{ marginBottom: 12 }}>
         <h2>Projects</h2>
         <div className="row">

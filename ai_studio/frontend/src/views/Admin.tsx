@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { api, Character, StatusPayload, StylePreview, VoiceProfile } from "../api";
 import { useToast, errText } from "../main";
-import { Badge, Empty, Panel, Spinner } from "../ui";
+import { Badge, Empty, Panel, Spinner, TtsVoiceBadge } from "../ui";
 
 const URLS: Record<string, string> = {
   studio: "http://127.0.0.1:8000",
@@ -423,6 +423,7 @@ function Settings({ status }: { status: StatusPayload | null }) {
   return (
     <div className="pad">
       <h2 style={{ marginBottom: 10 }}>Settings</h2>
+      <TtsVoiceBadge status={status} variant="banner" />
       <div className="split">
         <Panel title="Machine / VRAM" scroll>
           <div className="panel-b">
