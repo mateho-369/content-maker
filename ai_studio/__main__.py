@@ -57,6 +57,10 @@ def main(argv=None):
 
     app = create_app(data_root=args.data_dir or None, enable_demo_seed=args.demo)
     print(f"[studio] {args.host}:{args.port} · data → {cfg_mod.data_root()}")
+    # The serving loop is created inside uvicorn.run(), so the handler that
+    # swallows harmless client disconnects (ConnectionResetError [WinError
+    # 10054] from the Windows proactor transport when a browser aborts a video
+    # range request) is installed by app.py's lifespan on the running loop.
     try:
         import uvicorn
 

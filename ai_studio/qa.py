@@ -194,6 +194,29 @@ def validate_final_mp4(mp4_path: str, target_aspect: Tuple[int, int] = (9, 16)) 
     }
 
 
+def validate_example_assets(scenes: List[Dict], repo_root: Optional[str] = None) -> Dict:
+    """Fail a scene whose declared example/internet photo is not on disk.
+
+    A renderer that draws nothing for a missing file still produces a valid,
+    playable MP4, so every other check stays green while the promised photo is
+    simply absent from the video.
+    """
+    issues = []
+    for idx, sc in enumerate(scenes):
+        path = sc.get("example_img")
+        if not path:
+            continue
+        resolved = path if os.path.isabs(path) else os.path.join(repo_root or "", path)
+        if not os.path.isfile(resolved):
+            issues.append({
+                "severity": "fail",
+                "check": "example_asset",
+                "scene_idx": idx,
+                "issue": f"Scene {idx + 1} declares example image '{path}' but the file is missing",
+            })
+    return {"passed": not issues, "issues": issues}
+
+
 def run_full_project_qa(scenes: List[Dict], final_mp4_path: Optional[str] = None, content_type: str = "explainer") -> Dict:
     """Consolidated QA Gate assessment across all dimensions."""
     all_issues = []
@@ -201,6 +224,11 @@ def run_full_project_qa(scenes: List[Dict], final_mp4_path: Optional[str] = None
     # 1. Content hook & structure
     hook_res = validate_content_hook(scenes, content_type)
     all_issues.extend(hook_res.get("issues", []))
+
+    # 1b. Declared example/internet photos must exist (a missing one renders
+    #     as an empty card, which no other check can see).
+    asset_res = validate_example_assets(scenes)
+    all_issues.extend(asset_res.get("issues", []))
 
     # 2. Khmer script & typography on all scenes
     for idx, sc in enumerate(scenes):
@@ -226,5 +254,9 @@ def run_full_project_qa(scenes: List[Dict], final_mp4_path: Optional[str] = None
         "failures": fails,
         "warnings": warns,
         "total_scenes": len(scenes),
+        # what the gate believes the runtime is (from audio_duration /
+        # estimated_duration_sec per scene) — lets a renderer cross-check it
+        # against the timeline it actually assembled
+        "estimated_duration": hook_res.get("estimated_duration"),
         "mp4_verified": mp4_res["passed"] if mp4_res else False,
     }

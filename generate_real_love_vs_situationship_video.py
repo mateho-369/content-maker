@@ -18,7 +18,11 @@ from ai_studio import meme_engine as me
 from ai_studio import qa
 from ai_studio.engines import tts
 
-OUTPUT_DIR = "outputs/real_love_vs_situationship"
+# Anchored to the repo root so the output always lands in the folder the
+# gallery serves (ai_studio/app.py mounts <repo>/outputs), even when this
+# renderer is launched from another working directory.
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_DIR = os.path.join(REPO_ROOT, "outputs", "real_love_vs_situationship")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 SCENES = [
@@ -82,7 +86,7 @@ SCENES = [
 
 def render_project():
     cfg = cfg_mod.load()
-    char_asset = "ai_studio/assets/character_default.png"
+    char_asset = os.path.join(REPO_ROOT, "ai_studio", "assets", "character_default.png")
     scene_clips = []
     ass_dialogues = []
     current_time = 0.0
@@ -105,6 +109,10 @@ def render_project():
         assert res_tts["ok"]
         aud_check = qa.validate_voice_audio(audio_out)
         dur = max(2.5, aud_check["duration"])
+        # Real measured length, so the QA gate checks pacing against the
+        # audio it just made instead of its 3.0s placeholder default.
+        s["audio_duration"] = dur
+        s["estimated_duration_sec"] = dur
 
         # 2. Render visual clip
         video_out = os.path.join(OUTPUT_DIR, f"scene_{idx}_video.mp4")

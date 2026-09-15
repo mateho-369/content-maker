@@ -22,12 +22,48 @@ from ai_studio import qa
 from ai_studio import config as cfg_mod
 from ai_studio.engines import tts
 
-OUTPUT_DIR = "outputs/love_vs_situationship_white"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+# Anchored to the repo root: 3_RENDER_ALL_VIDEOS.bat `cd`s here, but anchoring
+# keeps the gallery path (ai_studio/app.py mounts <repo>/outputs) correct even
+# when the renderer is launched from somewhere else.
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_DIR = os.path.join(REPO_ROOT, "outputs", "love_vs_situationship_white")
 
-# Internet example images
-IMG_REAL_LOVE = "image-search/happy-couple-walking-together-sunset-rom-1.jpg"
-IMG_SITUATIONSHIP = "image-search/person-looking-at-phone-alone-night-sad--1.jpg"
+# Internet example images. Each entry is tried in order and the first file that
+# actually exists on disk wins, so a renamed/missing download can never silently
+# turn this into a photo-less video (the previous hardcoded paths pointed at
+# files that were not in image-search/, and `create_white_background` skipped
+# them without a word).
+IMG_REAL_LOVE_CANDIDATES = [
+    "image-search/happy-couple-walking-together-sunset-rom-1.jpg",
+    "image-search/happy-couple-holding-hands-romantic-date-1.jpg",
+    "image-search/happy-peaceful-person-walking-forward-co-1.jpg",
+]
+IMG_SITUATIONSHIP_CANDIDATES = [
+    "image-search/person-looking-at-phone-alone-night-sad--1.jpg",
+    "image-search/person-looking-at-phone-confused-sad-mix-1.jpg",
+]
+
+
+def resolve_example_image(candidates, label):
+    """Return the first existing candidate path, or None (with a console warning).
+
+    `create_white_background` draws nothing when the path is missing, so a stale
+    filename used to produce a scene with an empty white card while the log still
+    claimed `[Img: True]`. Warn loudly instead.
+    """
+    for cand in candidates:
+        path = cand if os.path.isabs(cand) else os.path.join(REPO_ROOT, cand)
+        if os.path.isfile(path):
+            return path
+    print(f"  [Warning] Example photo missing for {label}: tried "
+          f"{', '.join(candidates)} — the scene renders without it.")
+    return None
+
+
+IMG_REAL_LOVE = resolve_example_image(IMG_REAL_LOVE_CANDIDATES, "Real Love")
+IMG_SITUATIONSHIP = resolve_example_image(IMG_SITUATIONSHIP_CANDIDATES, "Situationship")
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 SCENES = [
     {
@@ -99,7 +135,26 @@ SCENES = [
 ]
 
 
-def create_white_background(width: int = 720, height: int = 1280, example_img_path: str | None = None, badge_text: str | None = None) -> np.ndarray:
+def read_example_photo(example_img_path, example_photo=None):
+    """Load a floating-card photo, or return None when it cannot be drawn.
+
+    Single place where "will this scene actually show the internet photo?" is
+    answered, so the render log, the QA gate and the pixels all agree.
+    Pass `example_photo` to reuse an already-decoded frame (the renderer loads
+    each photo once per scene instead of once per frame).
+    """
+    if example_photo is not None:
+        return example_photo if getattr(example_photo, "size", 0) else None
+    if not example_img_path or not os.path.exists(example_img_path):
+        return None
+    img = cv2.imread(example_img_path)
+    if img is None or img.size == 0:
+        return None
+    return img
+
+
+def create_white_background(width: int = 720, height: int = 1280, example_img_path: str | None = None, badge_text: str | None = None,
+                            example_photo: "np.ndarray | None" = None) -> np.ndarray:
     """Create a modern white studio background with optional floating photo card."""
     bg = np.ones((height, width, 3), dtype=np.uint8) * 255
     yy, xx = np.mgrid[0:height, 0:width]
@@ -113,39 +168,38 @@ def create_white_background(width: int = 720, height: int = 1280, example_img_pa
     horizon_y = int(height * 0.82)
     cv2.line(bg, (0, horizon_y), (width, horizon_y), (225, 230, 240), 2)
 
-    # If internet example image is provided, draw floating card at upper portion
-    if example_img_path and os.path.exists(example_img_path):
+    # If an example photo is provided, draw the floating card at the upper portion
+    ex_img = read_example_photo(example_img_path, example_photo=example_photo)
+    if ex_img is not None:
         card_w, card_h = 600, 340
         card_x1 = (width - card_w) // 2
         card_y1 = 80
         card_x2 = card_x1 + card_w
         card_y2 = card_y1 + card_h
 
-        ex_img = cv2.imread(example_img_path)
-        if ex_img is not None:
-            ih, iw = ex_img.shape[:2]
-            scale = max(card_w / iw, card_h / ih)
-            rw, rh = int(iw * scale), int(ih * scale)
-            ex_resized = cv2.resize(ex_img, (rw, rh), interpolation=cv2.INTER_AREA)
-            cx, cy = (rw - card_w) // 2, (rh - card_h) // 2
-            crop = ex_resized[cy:cy+card_h, cx:cx+card_w]
+        ih, iw = ex_img.shape[:2]
+        scale = max(card_w / iw, card_h / ih)
+        rw, rh = int(iw * scale), int(ih * scale)
+        ex_resized = cv2.resize(ex_img, (rw, rh), interpolation=cv2.INTER_AREA)
+        cx, cy = (rw - card_w) // 2, (rh - card_h) // 2
+        crop = ex_resized[cy:cy+card_h, cx:cx+card_w]
 
-            # Soft drop shadow
-            shadow = bg.copy()
-            cv2.rectangle(shadow, (card_x1 - 6, card_y1 - 2), (card_x2 + 6, card_y2 + 12), (210, 215, 225), -1)
-            bg = cv2.addWeighted(shadow, 0.45, bg, 0.55, 0)
+        # Soft drop shadow
+        shadow = bg.copy()
+        cv2.rectangle(shadow, (card_x1 - 6, card_y1 - 2), (card_x2 + 6, card_y2 + 12), (210, 215, 225), -1)
+        bg = cv2.addWeighted(shadow, 0.45, bg, 0.55, 0)
 
-            # Draw image content
-            bg[card_y1:card_y2, card_x1:card_x2] = crop
-            # Outer white border & inner clean line
-            cv2.rectangle(bg, (card_x1, card_y1), (card_x2, card_y2), (255, 255, 255), 4)
-            cv2.rectangle(bg, (card_x1, card_y1), (card_x2, card_y2), (200, 205, 215), 2)
+        # Draw image content
+        bg[card_y1:card_y2, card_x1:card_x2] = crop
+        # Outer white border & inner clean line
+        cv2.rectangle(bg, (card_x1, card_y1), (card_x2, card_y2), (255, 255, 255), 4)
+        cv2.rectangle(bg, (card_x1, card_y1), (card_x2, card_y2), (200, 205, 215), 2)
 
-            # Badge overlay
-            if badge_text:
-                clean_badge = badge_text.split(" ")[0] + (" " + badge_text.split(" ")[1] if len(badge_text.split(" ")) > 1 else "")
-                cv2.rectangle(bg, (card_x1 + 16, card_y1 + 16), (card_x1 + 240, card_y1 + 54), (20, 25, 35), -1)
-                cv2.putText(bg, clean_badge, (card_x1 + 24, card_y1 + 42), cv2.FONT_HERSHEY_DUPLEX, 0.72, (255, 255, 255), 2, cv2.LINE_AA)
+        # Badge overlay
+        if badge_text:
+            clean_badge = badge_text.split(" ")[0] + (" " + badge_text.split(" ")[1] if len(badge_text.split(" ")) > 1 else "")
+            cv2.rectangle(bg, (card_x1 + 16, card_y1 + 16), (card_x1 + 240, card_y1 + 54), (20, 25, 35), -1)
+            cv2.putText(bg, clean_badge, (card_x1 + 24, card_y1 + 42), cv2.FONT_HERSHEY_DUPLEX, 0.72, (255, 255, 255), 2, cv2.LINE_AA)
 
     return bg
 
@@ -154,7 +208,8 @@ def render_white_scene_clip(character_img_path: str, action: str, out_mp4: str,
                             duration: float, width: int = 720, height: int = 1280,
                             fps: int = 25, prop: str | None = None,
                             example_img_path: str | None = None,
-                            badge_text: str | None = None) -> str:
+                            badge_text: str | None = None,
+                            example_photo: "np.ndarray | None" = None) -> str:
     """Render one scene clip with white background, optional example photo, and animated mascot."""
     act = ca.normalize_action(action)
     dur = max(0.5, float(duration))
@@ -164,7 +219,7 @@ def render_white_scene_clip(character_img_path: str, action: str, out_mp4: str,
     if char_rgba is None:
         raise ValueError(f"Cannot load character asset: {character_img_path}")
 
-    base_bg = create_white_background(width, height, example_img_path, badge_text)
+    base_bg = create_white_background(width, height, example_img_path, badge_text, example_photo=example_photo)
 
     tmp_avi = out_mp4 + ".tmp.avi"
     fourcc = cv2.VideoWriter_fourcc(*"MJPG")
@@ -194,11 +249,26 @@ def render_white_scene_clip(character_img_path: str, action: str, out_mp4: str,
     return out_mp4
 
 
+def scene_image_note(scene) -> str:
+    """What the log prints for the internet-photo card of one scene.
+
+    Reports what the renderer will actually draw: `yes`, `no`, or
+    `MISSING → <path>` when the scene declares a photo the disk does not have.
+    The old `[Img: {bool(ex_img)}]` only checked that the path string was
+    non-empty, so a stale filename still logged `True`.
+    """
+    ex_img = scene.get("example_img")
+    if not ex_img:
+        return "no"
+    return "yes" if read_example_photo(ex_img) is not None else f"MISSING → {ex_img}"
+
+
 def render_project():
     cfg = cfg_mod.load()
-    char_asset = "ai_studio/assets/character_default.png"
+    char_asset = os.path.join(REPO_ROOT, "ai_studio", "assets", "character_default.png")
     scene_clips = []
     ass_dialogues = []
+    missing_photos = []
     current_time = 0.0
 
     print("=== Step 1: Synthesizing Audio & Rendering Scene Clips (White Studio) ===")
@@ -214,18 +284,26 @@ def render_project():
         audio_out = os.path.join(OUTPUT_DIR, f"scene_{idx}_audio.wav")
         res_tts = tts.synthesize(text, audio_out, cfg, emotion_style=emotion)
         dur = float(res_tts.get("duration", 5.0))
+        # Real measured length, so the QA gate below checks pacing against the
+        # audio it just made instead of its 3.0s placeholder default.
+        s["audio_duration"] = dur
+        s["estimated_duration_sec"] = dur
         aud_check = qa.validate_voice_audio(audio_out)
         if not aud_check.get("passed", True):
             print(f"  [Warning] Audio check: {aud_check.get('issues')}")
 
         # 2. Render scene video with white background and internet example image
+        photo = read_example_photo(ex_img)
+        if s.get("has_example_img") and photo is None:
+            missing_photos.append((idx + 1, s["title"], ex_img))
         video_out = os.path.join(OUTPUT_DIR, f"scene_{idx}_video.mp4")
         render_white_scene_clip(
             char_asset, action, video_out, dur,
             width=720, height=1280, fps=25,
             prop=s.get("prop"),
             example_img_path=ex_img,
-            badge_text=badge
+            badge_text=badge,
+            example_photo=photo
         )
 
         # 3. Combine audio + video
@@ -241,7 +319,11 @@ def render_project():
         ass_dialogues.append((current_time, current_time + dur, text))
         current_time += dur
 
-        print(f"  ✓ Scene {idx + 1} ({s['title']}): {dur:.2f}s [{action}] [{emotion}] [Img: {bool(ex_img)}]")
+        img_note = scene_image_note(s)
+        if img_note.startswith("MISSING"):
+            print(f"  [Warning] Scene {idx + 1} ({s['title']}) declares an internet photo "
+                  f"that is not on disk: {ex_img}")
+        print(f"  ✓ Scene {idx + 1} ({s['title']}): {dur:.2f}s [{action}] [{emotion}] [Img: {img_note}]")
 
     print(f"\n=== Step 2: Concatenating {len(scene_clips)} Scenes ===")
     concat_list = os.path.join(OUTPUT_DIR, "concat_list.txt")
@@ -295,11 +377,27 @@ def render_project():
 
     print("\n=== Step 5: Running QA Gate Verification ===")
     full_qa = qa.run_full_project_qa(SCENES, final_mp4_path=final_mp4, content_type="compare")
+    for n, title, path in missing_photos:
+        full_qa["failures"].append({
+            "severity": "fail", "check": "example_asset", "scene_idx": n - 1,
+            "issue": f"Scene {n} ({title}) needs internet photo '{path}' but it is not on disk",
+        })
+        full_qa["fail_count"] = len(full_qa["failures"])
+    full_qa["approved"] = full_qa["fail_count"] == 0
     print("  QA Gate Approved:", full_qa["approved"])
     print("  Failures:", full_qa["failures"])
     print("  Warnings:", full_qa["warnings"])
     print("  MP4 Verified:", full_qa["mp4_verified"])
+    print(f"  Runtime: {current_time:.2f}s ({len(scene_clips)} scenes)")
+    qa_est = full_qa.get("estimated_duration")
+    if qa_est is not None and abs(qa_est - current_time) > 0.5:
+        print(f"  [Warning] QA pacing ran against {qa_est:.2f}s but the assembled "
+              f"timeline is {current_time:.2f}s — scene durations drifted.")
+    return full_qa
 
 
 if __name__ == "__main__":
-    render_project()
+    _qa = render_project()
+    # A gate that fails has to make the batch renderer stop too, otherwise
+    # 3_RENDER_ALL_VIDEOS.bat keeps printing "ALL VIDEOS RENDERED SUCCESSFULLY".
+    raise SystemExit(0 if _qa["approved"] else 1)
