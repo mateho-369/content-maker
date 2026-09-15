@@ -30,26 +30,32 @@ import cv2
 import numpy as np
 
 CHARACTER_ACTIONS = [
+    "neutral",
     "talking",
     "pointing_left",
     "pointing_right",
     "pointing_up",
-    "looking_left",
-    "looking_right",
-    "surprised",
+    "pointing_down",
+    "explaining",
     "happy",
+    "very_happy",
     "sad",
-    "thinking",
-    "confused",
-    "laughing",
     "crying",
     "shocked",
+    "surprised",
+    "confused",
+    "thinking",
+    "angry",
+    "laughing",
+    "celebrating",
+    "embarrassed",
+    "disappointed",
+    "looking_left",
+    "looking_right",
     "walking",
     "sitting",
     "reacting",
-    "celebrating",
     "frustrated",
-    "explaining",
     "holding_object",
 ]
 
@@ -69,16 +75,22 @@ ACTION_METADATA = {
     "pointing_left": {"desc": "Directs viewer attention to the left info card", "category": "presentation"},
     "pointing_right": {"desc": "Directs viewer attention to the right info card", "category": "presentation"},
     "pointing_up": {"desc": "Emphasizes top headline or key takeaway", "category": "presentation"},
+    "pointing_down": {"desc": "Emphasizes lower subtitle, summary, or link", "category": "presentation"},
     "looking_left": {"desc": "Curious gaze toward left visual element", "category": "reaction"},
     "looking_right": {"desc": "Curious gaze toward right visual element", "category": "reaction"},
     "surprised": {"desc": "Eyes wide, slight backward recoil, energetic pop", "category": "reaction"},
     "happy": {"desc": "Warm, buoyant posture with cheerful rhythm", "category": "emotion"},
+    "very_happy": {"desc": "Exuberant double bounce with celebration sparkles", "category": "emotion"},
     "sad": {"desc": "Lowered posture, slow subtle movement, reflective", "category": "emotion"},
     "thinking": {"desc": "Contemplative tilt, floating thought cues", "category": "cognitive"},
     "confused": {"desc": "Head tilt wobble, questioning posture", "category": "cognitive"},
     "laughing": {"desc": "Upbeat comedic chuckle vibration", "category": "emotion"},
     "crying": {"desc": "Sorrowful downward slump with subtle tear motion", "category": "emotion"},
     "shocked": {"desc": "Dramatic zoom punch-in with high-energy jitter", "category": "reaction"},
+    "angry": {"desc": "Tense posture with heated pulse and steam puffs", "category": "emotion"},
+    "embarrassed": {"desc": "Shy look away with blushing cheek glow", "category": "emotion"},
+    "disappointed": {"desc": "Heavy sigh sag and dejected posture", "category": "emotion"},
+    "neutral": {"desc": "Calm, composed baseline pose with natural breathing", "category": "posture"},
     "walking": {"desc": "Stepped lateral sway and vertical step bounce", "category": "locomotion"},
     "sitting": {"desc": "Anchored seated posture with calm breathing", "category": "posture"},
     "reacting": {"desc": "Sudden turn toward camera with expression shift", "category": "reaction"},
@@ -98,7 +110,9 @@ def normalize_action(action: str) -> str:
         if "left" in act: return "pointing_left"
         if "right" in act: return "pointing_right"
         if "up" in act: return "pointing_up"
+        if "down" in act: return "pointing_down"
         return "pointing_right"
+    if "very_happy" in act or "super_happy" in act: return "very_happy"
     if "look" in act:
         if "left" in act: return "looking_left"
         if "right" in act: return "looking_right"
@@ -109,10 +123,14 @@ def normalize_action(action: str) -> str:
     if "surpris" in act: return "surprised"
     if "think" in act: return "thinking"
     if "confus" in act: return "confused"
+    if "angry" in act or "mad" in act: return "angry"
+    if "embarrass" in act or "blush" in act: return "embarrassed"
+    if "disappoint" in act: return "disappointed"
+    if "neutral" in act: return "neutral"
     if "walk" in act: return "walking"
     if "sit" in act: return "sitting"
     if "celebrat" in act or "win" in act: return "celebrating"
-    if "frustrat" in act or "angry" in act: return "frustrated"
+    if "frustrat" in act: return "frustrated"
     if "explain" in act: return "explaining"
     if "hold" in act or "prop" in act or "use" in act: return "holding_object"
     if "sad" in act or "sorrow" in act: return "sad"
@@ -216,6 +234,46 @@ def compute_action_transform(action: str, t: float, duration: float, has_audio_p
         oy = -35.0 * enter + math.sin(cycle * 0.6) * 4.0
         sy = 1.02 + 0.02 * enter
         effects["gesture"] = "point_up"
+
+    elif action == "pointing_down":
+        enter = min(1.0, t / 0.35)
+        oy = 30.0 * enter + math.sin(cycle * 0.6) * 3.0
+        sy = 0.98 + 0.01 * enter
+        effects["gesture"] = "point_down"
+
+    elif action == "neutral":
+        breathe = math.sin(cycle * 0.6) * 0.01
+        sy = 1.0 + breathe
+        sx = 1.0 - breathe * 0.5
+        oy = math.sin(cycle * 0.6) * 4.0
+
+    elif action == "very_happy":
+        double_bounce = abs(math.sin(t * 5.0 * math.pi))
+        oy = -55.0 * double_bounce
+        sy = 1.08 + 0.08 * double_bounce
+        sx = 0.95 - 0.04 * double_bounce
+        rot = math.sin(t * 3.5 * math.pi) * 3.5
+        effects["accent"] = "sparkles"
+
+    elif action == "angry":
+        jitter = math.sin(t * 28.0 * math.pi) * 5.0
+        ox = jitter
+        sy = 1.03 + 0.02 * math.sin(cycle * 2.0)
+        rot = math.sin(t * 14.0 * math.pi) * 2.0
+        effects["accent"] = "steam_puff"
+
+    elif action == "embarrassed":
+        rot = 4.0 + math.sin(cycle * 0.5) * 2.0
+        ox = -20.0
+        sy = 0.96 + math.sin(cycle * 0.5) * 0.01
+        effects["accent"] = "blush"
+
+    elif action == "disappointed":
+        sag = min(1.0, t / 0.6)
+        oy = 35.0 * sag + math.sin(cycle * 0.3) * 3.0
+        sy = 0.92 - 0.02 * sag
+        rot = -3.0 * sag
+        effects["accent"] = "sigh"
 
     elif action == "looking_left":
         ox = -30.0 + math.sin(cycle * 0.4) * 6.0
@@ -396,9 +454,10 @@ def render_action_frame(base_bg: np.ndarray, character_rgba: np.ndarray,
         action, t, duration, has_audio_pulse=(pulse_level > 0.01), pulse_level=pulse_level
     )
 
-    # Base positioning: character anchored horizontally centered, lower-third base
+    # Base positioning: character anchored horizontally centered, upper-mid frame
+    # Leaving safe lower-third for subtitles and platform UI
     char_h, char_w = character_rgba.shape[:2]
-    target_h = int(h * 0.62 * sy)
+    target_h = int(h * 0.52 * sy)
     target_w = int(char_w * (target_h / char_h) * sx)
     target_w = max(10, target_w)
     target_h = max(10, target_h)
@@ -411,9 +470,9 @@ def render_action_frame(base_bg: np.ndarray, character_rgba: np.ndarray,
         resized_char = cv2.warpAffine(resized_char, m_rot, (target_w, target_h), flags=cv2.INTER_LINEAR,
                                       borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0, 0))
 
-    # Center position
+    # Center position: upper-mid area (y ~ 0.48) to keep lower-third completely clear for captions
     cx = int(w * 0.5 + ox)
-    cy = int(h * 0.72 + oy)
+    cy = int(h * 0.48 + oy)
     x1 = cx - target_w // 2
     y1 = cy - target_h // 2
     x2 = x1 + target_w
@@ -490,6 +549,11 @@ def render_character_action_clip(character_img_path: str, action: str,
     num_frames = int(round(dur * fps))
 
     # Read character asset
+    default_asset = os.path.join(os.path.dirname(__file__), "assets", "character_default.png")
+    if not character_img_path or not os.path.exists(character_img_path):
+        if os.path.exists(default_asset):
+            character_img_path = default_asset
+
     if not character_img_path or not os.path.exists(character_img_path):
         # Generate placeholder humanoid avatar
         char_rgba = np.zeros((600, 400, 4), dtype=np.uint8)
