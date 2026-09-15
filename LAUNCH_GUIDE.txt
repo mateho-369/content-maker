@@ -1,0 +1,56 @@
+AUTO-CLIP ENGINE - LAUNCH GUIDE
+===============================
+Location: C:\Users\Makara\Desktop\auto-clip\
+
+FOLDER STRUCTURE YOU SHOULD HAVE:
+auto-clip\
+  Auto-Clip-Engine\          <- this repo (all .bat here)
+  ComfyUI\                   <- git clone https://github.com/comfyanonymous/ComfyUI
+  Retrieval-based-Voice-Conversion-WebUI\  <- git clone https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI
+  .claude\  .vscode\  (config, not needed to run)
+  START_ALL.bat              <- copy from Auto-Clip-Engine\START_ALL_FROM_ROOT.bat
+
+FIRST TIME (ONCE):
+1. Install Python 3.11, Git, ffmpeg, Ollama, Node.js 18+
+   winget install Python.Python.3.11
+   winget install Git.Git
+   winget install Gyan.FFmpeg
+   winget install Ollama.Ollama
+2. Double-click Auto-Clip-Engine\setup_all.bat
+   - creates venvs, installs deps, builds frontend, pulls Ollama models
+   - takes 5-15 minutes
+3. Place ComfyUI models (see install_models_helper.bat and README-STUDIO.md)
+
+DAILY USE:
+- Double-click auto-clip\START_ALL.bat  OR  Auto-Clip-Engine\START.bat
+- Wait for 4 windows to open, then browser opens http://localhost:8000/
+- To stop: Auto-Clip-Engine\STOP_ALL.bat
+
+SERVICES:
+- Studio :8000 = main UI
+- ComfyUI :8188 = video + SFX (Wan + MMAudio)
+- Ollama :11434 = LLM (sailor2:8b for Khmer)
+- RVC :9513 or :7865 = voice cloning
+
+CHECK:
+- run check_system.bat for diagnostics
+- curl http://127.0.0.1:8000/api/status
+
+PORT CONFLICT?
+- Studio uses 8000, but you can run: run_studio.bat 8002
+- ComfyUI uses 8188, RVC 9513/7865, Ollama 11434
+
+TROUBLESHOOT:
+- Frontend empty -> cd ai_studio\frontend && npm ci && npm run build
+- previz instead of real video -> ComfyUI not running or models missing
+- placeholder voice -> run scripts\setup_khmer_tts.ps1
+- bypass timbre -> train voice in Studio UI -> Voices
+- CUDA OOM -> edit run_comfyui.bat add --lowvram
+- Port busy -> STOP_ALL.bat then START.bat
+
+MORE DOCS:
+- docs/HOW-TO-RUN.md
+- docs/ARCHITECTURE.md
+- README-STUDIO.md
+- BAT_README.md
+

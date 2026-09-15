@@ -1,0 +1,55 @@
+{
+  "1": {
+    "class_type": "MMAudioModelLoader",
+    "inputs": {
+      "mmaudio_model": "mmaudio_large_44k_v2_fp16.safetensors",
+      "base_precision": "fp16"
+    }
+  },
+  "2": {
+    "class_type": "MMAudioFeatureUtilsLoader",
+    "inputs": {
+      "vae_model": "mmaudio_vae_44k_fp16.safetensors",
+      "synchformer_model": "mmaudio_synchformer_fp16.safetensors",
+      "clip_model": "apple_DFN5B-CLIP-ViT-H-14-384_fp16.safetensors",
+      "mode": "44k",
+      "precision": "fp16"
+    }
+  },
+  "3": {
+    "class_type": "VHS_LoadVideo",
+    "inputs": {
+      "video": "{{VIDEO_PATH}}",
+      "force_rate": 0,
+      "force_size": "Disabled",
+      "custom_width": 512,
+      "custom_height": 512,
+      "frame_load_cap": 0,
+      "skip_first_frames": 0,
+      "select_every_nth": 1
+    }
+  },
+  "4": {
+    "class_type": "MMAudioSampler",
+    "inputs": {
+      "mmaudio_model": ["1", 0],
+      "feature_utils": ["2", 0],
+      "images": ["3", 0],
+      "duration": "{{DURATION}}",
+      "steps": "{{STEPS}}",
+      "cfg": "{{CFG}}",
+      "seed": "{{SEED}}",
+      "prompt": "{{SFX_PROMPT}}",
+      "negative_prompt": "{{NEGATIVE}}",
+      "mask_away_clip": false,
+      "force_offload": true
+    }
+  },
+  "5": {
+    "class_type": "SaveAudio",
+    "inputs": {
+      "audio": ["4", 0],
+      "filename_prefix": "{{OUT_PREFIX}}"
+    }
+  }
+}
