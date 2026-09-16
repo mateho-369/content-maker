@@ -77,7 +77,7 @@ echo   - Virtual environment created successfully.
 goto VENV_INSTALL_DEPS
 
 :VENV_CHECK_FUNCTIONAL
-:: Test if the existing venv python actually works
+:: Test if the existing venv python actually works AND pip is functional
 "%VENV_PY%" --version >nul 2>&1
 if errorlevel 1 (
     echo   - Existing virtual environment is corrupted. Rebuilding...
@@ -85,8 +85,32 @@ if errorlevel 1 (
     %PY_CMD% -m venv "%VENV_DIR%"
     if errorlevel 1 goto VENV_FAIL
     echo   - Virtual environment rebuilt successfully.
+    goto VENV_INSTALL_DEPS
 )
-goto VENV_INSTALL_DEPS
+
+:: Check if pip is working (corrupted venv often has broken pip)
+"%VENV_DIR%\Scripts\pip.exe" --version >nul 2>&1
+if errorlevel 1 (
+    echo   - Virtual environment pip is corrupted. Rebuilding...
+    rmdir /s /q "%VENV_DIR%"
+    %PY_CMD% -m venv "%VENV_DIR%"
+    if errorlevel 1 goto VENV_FAIL
+    echo   - Virtual environment rebuilt successfully.
+    goto VENV_INSTALL_DEPS
+)
+
+:: Check if critical packages are importable (detect partial corruption)
+"%VENV_PY%" -c "import fastapi; import PIL; import numpy" >nul 2>&1
+if errorlevel 1 (
+    echo   - Virtual environment packages are corrupted. Rebuilding...
+    rmdir /s /q "%VENV_DIR%"
+    %PY_CMD% -m venv "%VENV_DIR%"
+    if errorlevel 1 goto VENV_FAIL
+    echo   - Virtual environment rebuilt successfully.
+    goto VENV_INSTALL_DEPS
+)
+
+goto VENV_READY
 
 :VENV_INSTALL_DEPS
 echo   - Upgrading pip...

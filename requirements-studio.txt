@@ -14,8 +14,8 @@
 fastapi==0.141.1
 uvicorn[standard]==0.52.0          # [standard] brings websockets for /api/runs/{id}/events
 python-multipart==0.0.32           # UploadFile: RVC voice .zip / model imports
-numpy==2.4.4
-pillow==10.4.0                     # previz frames + thumbnails
+numpy>=2.0.0                       # Compatible with Python 3.14
+pillow>=10.0.0                     # Compatible with Python 3.14 (prebuilt wheels)
 opencv-python-headless<5           # procedural character animations + video frame synthesis
 imageio-ffmpeg==0.6.0              # bundled ffmpeg binary when none is on PATH
 uharfbuzz==0.56.1                  # Khmer shaping: real glyph clusters + shaped pixel widths
