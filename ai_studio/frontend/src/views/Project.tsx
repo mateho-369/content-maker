@@ -3,6 +3,10 @@ import { api, Asset, Project, Run, Scene, StageRow, StageSpec, StylePreview } fr
 import { useToast, errText } from "../main";
 import { Badge, Bar, Empty, Panel, StatusBadge, fmtDur, fmtSize, fmtTime, Spinner } from "../ui";
 import { CaptionStudio } from "./CaptionStudio";
+import { ManualControlPanel } from "../components/ManualControlPanel";
+import { BackgroundSelector, type BackgroundChoice } from "../components/BackgroundSelector";
+import { PreRunSummary } from "../components/PreRunSummary";
+import { LiveProgress } from "../components/LiveProgress";
 
 interface Live {
   run_id?: string; status?: string; stages?: StageRow[]; overall?: { pct?: number }; events?: any[];
@@ -117,8 +121,24 @@ export function ProjectView({ projectId, onOpen }: { projectId: string; onOpen: 
   const stages = specs.length ? specs : STAGE_FALLBACK;
   const sc = proj.scenes || [];
   const [workflowTab, setWorkflowTab] = useState<"board" | "director" | "qa">("board");
-
+  
+  // Manual mode state
   const isAuto = proj.settings?.control_mode !== "manual";
+  const [selectedScenes, setSelectedScenes] = useState<number[]>([]);
+  const [enabledStages, setEnabledStages] = useState<string[]>(["breakdown", "voice_base", "sfx", "subtitles", "qa", "assemble"]);
+  const [defaultAction, setDefaultAction] = useState("talking");
+  const [defaultEmotion, setDefaultEmotion] = useState("calm");
+  const [defaultVisual, setDefaultVisual] = useState("illustration");
+  const [globalBackground, setGlobalBackground] = useState<BackgroundChoice>({ type: "white_studio" });
+  const [outputFormat, setOutputFormat] = useState("mp4");
+  const [resolution, setResolution] = useState("720x1280");
+  const [fps, setFps] = useState(30);
+  const [parallelWorkers, setParallelWorkers] = useState(2);
+  const [skipQA, setSkipQA] = useState(false);
+  const [previewOnly, setPreviewOnly] = useState(false);
+  const [showPreRunSummary, setShowPreRunSummary] = useState(false);
+  const [isRunning, setIsRunning] = useState(false);
+  
   const toggleControlMode = async () => {
     const nextMode = isAuto ? "manual" : "auto";
     try {
@@ -131,6 +151,34 @@ export function ProjectView({ projectId, onOpen }: { projectId: string; onOpen: 
     } catch (e) {
       toast(errText(e), "err");
     }
+  };
+  
+  const handleRunClick = () => {
+    if (!isAuto) {
+      setShowPreRunSummary(true);
+    } else {
+      startRun({});
+    }
+  };
+  
+  const handleConfirmRun = () => {
+    setShowPreRunSummary(false);
+    setIsRunning(true);
+    const runPayload: any = {
+      selected_scenes: selectedScenes,
+      enabled_stages: enabledStages,
+      default_action: defaultAction,
+      default_emotion: defaultEmotion,
+      default_visual: defaultVisual,
+      background: globalBackground,
+      output_format: outputFormat,
+      resolution,
+      fps,
+      parallel_workers: parallelWorkers,
+      skip_qa: skipQA,
+      preview_only: previewOnly && selectedScenes.length > 3,
+    };
+    startRun(runPayload);
   };
 
   return (
@@ -150,7 +198,7 @@ export function ProjectView({ projectId, onOpen }: { projectId: string; onOpen: 
           <StatusBadge status={live?.status || proj.status} />
         </div>
         <div className="row" style={{ gap: 6 }}>
-          <button className="btn primary" disabled={!!busy} onClick={() => startRun({})}>{busy === "starting" ? <Spinner /> : "▶ Run Studio"}</button>
+          <button className="btn primary" disabled={!!busy} onClick={handleRunClick}>{busy === "starting" ? <Spinner /> : "▶ Run Studio"}</button>
           <button className="btn" disabled={!live?.run_id || !!busy}
             onClick={() => act("pause", `/runs/${live!.run_id}/pause`)}>⏸</button>
           <button className="btn" disabled={!live?.run_id || !!busy}
@@ -166,6 +214,64 @@ export function ProjectView({ projectId, onOpen }: { projectId: string; onOpen: 
             🖥 GPU catch-up{(deferredCount > 0) ? ` (${deferredCount})` : ""}</button>
         </div>
       </div>
+
+      {/* Manual Control Panel - only visible in manual mode */}
+      {!isAuto && workflowTab === "board" && (
+        <ManualControlPanel
+          script={proj.script || ""}
+          onScriptChange={(script) => {}}
+          scenes={sc}
+          selectedScenes={selectedScenes}
+          onSelectedScenesChange={setSelectedScenes}
+          defaultAction={defaultAction}
+          onDefaultActionChange={setDefaultAction}
+          defaultEmotion={defaultEmotion}
+          onDefaultEmotionChange={setDefaultEmotion}
+          defaultVisual={defaultVisual}
+          onDefaultVisualChange={setDefaultVisual}
+          defaultBackground={globalBackground.type}
+          onDefaultBackgroundChange={(bg) => setGlobalBackground({ type: bg as any })}
+          enabledStages={enabledStages}
+          onEnabledStagesChange={setEnabledStages}
+          outputFormat={outputFormat}
+          onOutputFormatChange={setOutputFormat}
+          resolution={resolution}
+          onResolutionChange={setResolution}
+          fps={fps}
+          onFpsChange={setFps}
+          parallelWorkers={parallelWorkers}
+          onParallelWorkersChange={setParallelWorkers}
+          skipQA={skipQA}
+          onSkipQAChange={setSkipQA}
+          previewOnly={previewOnly}
+          onPreviewOnlyChange={setPreviewOnly}
+          onReset={() => {
+            setDefaultAction("talking");
+            setDefaultEmotion("calm");
+            setDefaultVisual("illustration");
+            setGlobalBackground({ type: "white_studio" });
+            setEnabledStages(["breakdown", "voice_base", "sfx", "subtitles", "qa", "assemble"]);
+            setOutputFormat("mp4");
+            setResolution("720x1280");
+            setFps(30);
+            setParallelWorkers(2);
+            setSkipQA(false);
+            setPreviewOnly(false);
+          }}
+          onRun={handleConfirmRun}
+          rvcAvailable={false}
+          gpuAvailable={false}
+        />
+      )}
+
+      {/* Global Background Selector - visible in manual mode */}
+      {!isAuto && workflowTab === "board" && (
+        <BackgroundSelector
+          value={globalBackground}
+          onChange={setGlobalBackground}
+          compact={false}
+        />
+      )}
 
       {/* Promax Workflow Step Tabs */}
       <div className="tabs" style={{ marginBottom: 12 }}>
@@ -190,6 +296,24 @@ export function ProjectView({ projectId, onOpen }: { projectId: string; onOpen: 
           )}
           {workflowTab === "board" && (
             <>
+              {/* Live Progress - shown when running */}
+              {isRunning && live?.status === "running" && (
+                <LiveProgress
+                  currentScene={selectedScenes.length > 0 ? selectedScenes[0] + 1 : 1}
+                  totalScenes={selectedScenes.length || sc.length}
+                  sceneText={sc[selectedScenes[0] || 0]?.text || ""}
+                  stageName={live.stages?.[0]?.stage || "Initializing"}
+                  progressPct={live.overall?.pct || 0}
+                  overallPct={live.overall?.pct || 0}
+                  elapsedSec={0}
+                  etaSec={0}
+                  speedPerMin={0}
+                  status={live.status}
+                  onPause={() => act("pause", `/runs/${live.run_id}/pause`)}
+                  onSkip={() => {}}
+                  onCancel={() => act("cancel", `/runs/${live.run_id}/cancel`)}
+                />
+              )}
               <PipelineDAG stages={stages} rows={runRows} onStage={(k) => setSelStage(k)} />
               <CaptionStudio projectId={proj.id} initial={capStyle} onChanged={load} />
               <SceneBoard proj={proj} scenes={sc} rows={runRows} assets={assets} sel={selScene}
@@ -202,6 +326,29 @@ export function ProjectView({ projectId, onOpen }: { projectId: string; onOpen: 
         <Inspector proj={proj} scenes={sc} stage={selStage} scene={selScene} assets={assets}
           rows={runRows} onChanged={load} act={act} busy={busy} specs={stages} />
       </div>
+
+      {/* Pre-Run Summary Modal */}
+      {showPreRunSummary && (
+        <PreRunSummary
+          mode="manual"
+          totalScenes={sc.length}
+          selectedScenes={selectedScenes}
+          enabledStages={enabledStages}
+          totalStages={["breakdown", "voice_base", "rvc", "talking_head", "video_gen", "sfx", "subtitles", "qa", "assemble"]}
+          background={globalBackground}
+          voice="Edge-TTS (km-KH-PisethNeural)"
+          estimatedTime="2 minutes"
+          estimatedSize="35 MB"
+          skippedItems={[
+            !enabledStages.includes("rvc") ? "RVC (not installed)" : null,
+            !enabledStages.includes("talking_head") ? "GPU stages (deferred)" : null,
+            selectedScenes.length < sc.length ? `Scenes ${sc.map((_, i) => !selectedScenes.includes(i) ? i + 1 : null).filter(Boolean).join(", ")}` : null,
+          ].filter(Boolean) as string[]}
+          onCancel={() => setShowPreRunSummary(false)}
+          onEdit={() => setShowPreRunSummary(false)}
+          onRun={handleConfirmRun}
+        />
+      )}
     </div>
   );
 }
@@ -490,7 +637,25 @@ function SceneBoard({ proj, scenes, rows, assets, sel, onSel, onChanged, act, bu
 
   return (
     <Panel title={`Scene board (${scenes.length})`}
-      right={<button className="btn tiny primary" onClick={save} disabled={busy === "board"}>save board</button>}>
+      right={
+        <div className="row" style={{ gap: 6 }}>
+          <button className="btn tiny primary" onClick={() => {
+            const newScene: Scene = {
+              idx: scenes.length,
+              text: "New scene text...",
+              visual_prompt: "",
+              mood_tag: "neutral",
+              estimated_duration_sec: 3,
+              audio_duration: 0,
+              sfx_prompt: "",
+              meta: { character_action: defaultAction, emotion_style: defaultEmotion, visual_source: defaultVisual, background: globalBackground },
+            };
+            setDraft([...draft, newScene]);
+            save();
+          }} disabled={busy === "board"}>+ Add Scene</button>
+          <button className="btn tiny primary" onClick={save} disabled={busy === "board"}>save board</button>
+        </div>
+      }>
       <table className="grid">
         <thead>
           <tr>
@@ -499,6 +664,7 @@ function SceneBoard({ proj, scenes, rows, assets, sel, onSel, onChanged, act, bu
             <th style={{ width: 140 }}>action & prop</th>
             <th style={{ width: 110 }}>emotion</th>
             <th style={{ width: 130 }}>visual source</th>
+            <th style={{ width: 90 }}>background</th>
             <th style={{ width: 60 }}>⏱</th>
             <th style={{ width: 110 }}>production</th>
           </tr>
@@ -506,9 +672,10 @@ function SceneBoard({ proj, scenes, rows, assets, sel, onSel, onChanged, act, bu
         <tbody>
           {grouped.map((g, gi) => (
             <React.Fragment key={gi}>
-              {g.label && <tr className="group-head"><td colSpan={7}>{g.label}</td></tr>}
+              {g.label && <tr className="group-head"><td colSpan={8}>{g.label}</td></tr>}
               {g.items.map((s, i) => {
                 const vs = s.meta?.visual_source || (hasChar(proj, s) ? "character_action" : "illustration");
+                const bg = s.meta?.background?.type || globalBackground.type;
                 return (
                   <tr key={i} onClick={() => onSel(i)} style={{ cursor: "pointer", background: sel === i ? "#242a35" : undefined }}>
                     <td><b>{i + 1}</b>{s.meta?.side ? <><br /><Badge>{s.meta.side}</Badge></> : null}</td>
@@ -543,6 +710,18 @@ function SceneBoard({ proj, scenes, rows, assets, sel, onSel, onChanged, act, bu
                         </select>
                       )}
                     </td>
+                    <td>
+                      <select
+                        value={bg}
+                        onChange={(e) => patchScene(i, { background: { type: e.target.value as any } })}
+                        style={{ width: "100%", padding: "2px 4px", fontSize: 10 }}
+                      >
+                        <option value="white_studio">⬜ White</option>
+                        <option value="black_studio">⬛ Black</option>
+                        <option value="gradient">🎨 Gradient</option>
+                        <option value="template">📦 Template</option>
+                      </select>
+                    </td>
                     <td className="mono">{fmtDur(s.estimated_duration_sec)}</td>
                     <td>
                       {hasChar(proj, s) && (
@@ -573,6 +752,55 @@ function SceneBoard({ proj, scenes, rows, assets, sel, onSel, onChanged, act, bu
           ))}
         </tbody>
       </table>
+      {/* Add Scene button at bottom */}
+      <div style={{ padding: 8, display: "flex", gap: 6, justifyContent: "center" }}>
+        <button className="btn tiny" onClick={() => {
+          const newScene: Scene = {
+            idx: scenes.length,
+            text: "New scene text...",
+            visual_prompt: "",
+            mood_tag: "neutral",
+            estimated_duration_sec: 3,
+            audio_duration: 0,
+            sfx_prompt: "",
+            meta: { character_action: defaultAction, emotion_style: defaultEmotion, visual_source: defaultVisual, background: globalBackground },
+          };
+          setDraft([...draft, newScene]);
+          save();
+        }}>+ Add Scene</button>
+        <button className="btn tiny" onClick={() => {
+          // Import script - paste multiple lines
+          const text = prompt("Paste your script (one line per scene):");
+          if (text) {
+            const lines = text.split("\n").filter((l) => l.trim());
+            const newScenes = lines.map((line, idx) => ({
+              idx: scenes.length + idx,
+              text: line.trim(),
+              visual_prompt: "",
+              mood_tag: "neutral",
+              estimated_duration_sec: 3,
+              audio_duration: 0,
+              sfx_prompt: "",
+              meta: { character_action: defaultAction, emotion_style: defaultEmotion, visual_source: defaultVisual, background: globalBackground },
+            }));
+            setDraft([...draft, ...newScenes]);
+            save();
+          }
+        }}>📥 Import Script</button>
+        <button className="btn tiny" onClick={() => {
+          // Duplicate last scene
+          if (draft.length > 0) {
+            const last = draft[draft.length - 1];
+            const newScene: Scene = {
+              ...last,
+              idx: scenes.length,
+              meta: { ...last.meta },
+            };
+            setDraft([...draft, newScene]);
+            save();
+          }
+        }}>📋 Duplicate Last</button>
+      </div>
     </Panel>
   );
 }

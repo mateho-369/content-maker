@@ -68,11 +68,27 @@ echo [2/4] Checking Python Virtual Environment (.venv-studio)...
 set "VENV_DIR=%SCRIPT_DIR%\.venv-studio"
 set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
 
-if exist "%VENV_PY%" goto VENV_READY
+:: Check if venv exists AND is functional (not just the file presence)
+if exist "%VENV_PY%" goto VENV_CHECK_FUNCTIONAL
 echo   - Creating virtual environment at .venv-studio ...
 %PY_CMD% -m venv "%VENV_DIR%"
 if errorlevel 1 goto VENV_FAIL
 echo   - Virtual environment created successfully.
+goto VENV_INSTALL_DEPS
+
+:VENV_CHECK_FUNCTIONAL
+:: Test if the existing venv python actually works
+"%VENV_PY%" --version >nul 2>&1
+if errorlevel 1 (
+    echo   - Existing virtual environment is corrupted. Rebuilding...
+    rmdir /s /q "%VENV_DIR%"
+    %PY_CMD% -m venv "%VENV_DIR%"
+    if errorlevel 1 goto VENV_FAIL
+    echo   - Virtual environment rebuilt successfully.
+)
+goto VENV_INSTALL_DEPS
+
+:VENV_INSTALL_DEPS
 echo   - Upgrading pip...
 "%VENV_PY%" -m pip install --quiet --upgrade pip setuptools wheel
 echo   - Auto-installing studio dependencies...
