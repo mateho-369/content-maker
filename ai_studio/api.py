@@ -986,10 +986,38 @@ async def api_voices():
         r["pth_exists"] = bool(r.get("pth_path")) and os.path.exists(r["pth_path"])
         r["index_exists"] = bool(r.get("index_path")) and os.path.exists(r["index_path"])
         r["sample_url"] = f"/api/voices/{r['id']}/sample" if r.get("sample_path") else ""
+    
+    # Add Edge-TTS neural voices as built-in options
+    edge_tts_voices = [
+        {
+            "id": "edge_km_KH_PisethNeural",
+            "name": "Edge-TTS Piseth (Male) - km-KH-PisethNeural",
+            "engine": "edge_tts",
+            "voice_code": "km-KH-PisethNeural",
+            "gender": "male",
+            "language": "km-KH",
+            "quality": "neural",
+            "requires_gpu": False,
+            "built_in": True
+        },
+        {
+            "id": "edge_km_KH_SreymomNeural",
+            "name": "Edge-TTS Sreymom (Female) - km-KH-SreymomNeural",
+            "engine": "edge_tts",
+            "voice_code": "km-KH-SreymomNeural",
+            "gender": "female",
+            "language": "km-KH",
+            "quality": "neural",
+            "requires_gpu": False,
+            "built_in": True
+        }
+    ]
+    
     cfg = st.config()
     discovered = await asyncio.to_thread(_discover_rvc, cfg)
-    return {"voices": rows, "discovered": discovered,
-            "rvc": {"webui_dir": cfg["rvc"].get("webui_dir"), "api_base": cfg["rvc"].get("api_base")}}
+    return {"voices": edge_tts_voices + rows, "discovered": discovered,
+            "rvc": {"webui_dir": cfg["rvc"].get("webui_dir"), "api_base": cfg["rvc"].get("api_base")},
+            "edge_tts_available": True}
 
 
 def _discover_rvc(cfg):
