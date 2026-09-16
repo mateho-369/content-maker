@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { api, Asset, Project, Run, Scene, StageRow, StageSpec, StylePreview } from "../api";
+import { api, Asset, Project, Run, Scene, StageRow, StageSpec, StylePreview, VoiceProfile } from "../api";
 import { useToast, errText } from "../main";
 import { Badge, Bar, Empty, Panel, StatusBadge, fmtDur, fmtSize, fmtTime, Spinner } from "../ui";
 import { CaptionStudio } from "./CaptionStudio";
@@ -138,6 +138,20 @@ export function ProjectView({ projectId, onOpen }: { projectId: string; onOpen: 
   const [previewOnly, setPreviewOnly] = useState(false);
   const [showPreRunSummary, setShowPreRunSummary] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
+  const [voices, setVoices] = useState<VoiceProfile[]>([]);
+  const [selectedVoice, setSelectedVoice] = useState("");
+  
+  useEffect(() => {
+    api<{ voices: VoiceProfile[] }>("/voices")
+      .then((r) => {
+        setVoices(r.voices || []);
+        if (!selectedVoice && r.voices?.length) {
+          const edgeTts = r.voices.find(v => v.engine === "edge_tts");
+          if (edgeTts) setSelectedVoice(edgeTts.id);
+        }
+      })
+      .catch(() => {});
+  }, []);
   
   const toggleControlMode = async () => {
     const nextMode = isAuto ? "manual" : "auto";
@@ -261,6 +275,9 @@ export function ProjectView({ projectId, onOpen }: { projectId: string; onOpen: 
           onRun={handleConfirmRun}
           rvcAvailable={false}
           gpuAvailable={false}
+          voices={voices}
+          selectedVoice={selectedVoice}
+          onSelectedVoiceChange={setSelectedVoice}
         />
       )}
 
