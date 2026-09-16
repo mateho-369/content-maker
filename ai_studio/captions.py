@@ -509,7 +509,7 @@ def style_ass_header(style: dict, out_w: int, out_h: int, karaoke: bool = False)
 
 
 def _pack_karaoke_pixels(tags: list[str], shaper: "Shaper", budget_px: float) -> list[str]:
-    """Pack `{\k…}word` tokens into lines within a shaped-pixel budget.
+    r"""Pack `{\k…}word` tokens into lines within a shaped-pixel budget.
 
     Same rule as the sentence path (khmer.wrap_words) but operating on
     tag-glued tokens: width counts only the visible word plus a shaped space;

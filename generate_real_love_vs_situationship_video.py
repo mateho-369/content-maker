@@ -17,6 +17,7 @@ from ai_studio import media
 from ai_studio import meme_engine as me
 from ai_studio import qa
 from ai_studio.engines import tts
+from ai_studio.util import ffmpeg_exe
 
 # Anchored to the repo root so the output always lands in the folder the
 # gallery serves (ai_studio/app.py mounts <repo>/outputs), even when this
@@ -131,8 +132,9 @@ def render_project():
 
         # 3. Combine audio + video
         muxed_clip = os.path.join(OUTPUT_DIR, f"scene_{idx}_muxed.mp4")
+        ff = ffmpeg_exe() or "ffmpeg"
         subprocess.check_call([
-            "ffmpeg", "-y", "-i", video_out, "-i", audio_out,
+            ff, "-y", "-i", video_out, "-i", audio_out,
             "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
             "-shortest", muxed_clip
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -150,7 +152,7 @@ def render_project():
 
     assembled_raw = os.path.join(OUTPUT_DIR, "assembled_raw.mp4")
     subprocess.check_call([
-        "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_list,
+        ff, "-y", "-f", "concat", "-safe", "0", "-i", concat_list,
         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", assembled_raw
     ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -175,7 +177,7 @@ def render_project():
     for fname, t_sec in frames:
         fpath = os.path.join(OUTPUT_DIR, fname)
         subprocess.check_call([
-            "ffmpeg", "-y", "-ss", str(t_sec), "-i", final_mp4,
+            ff, "-y", "-ss", str(t_sec), "-i", final_mp4,
             "-vframes", "1", fpath
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         print(f"  ✓ Extracted {fname} at {t_sec}s")

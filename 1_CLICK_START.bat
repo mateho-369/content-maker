@@ -32,11 +32,16 @@ if !ERRORLEVEL! EQU 0 (
   if !ERRORLEVEL! EQU 0 (
     set "PY_CMD=py -3.11"
   ) else (
-    py -3.10 --version >nul 2>&1
+    py -3.12 --version >nul 2>&1
     if !ERRORLEVEL! EQU 0 (
-      set "PY_CMD=py -3.10"
+      set "PY_CMD=py -3.12"
     ) else (
-      set "PY_CMD=py"
+      py -3.10 --version >nul 2>&1
+      if !ERRORLEVEL! EQU 0 (
+        set "PY_CMD=py -3.10"
+      ) else (
+        set "PY_CMD=py"
+      )
     )
   )
 )
@@ -78,12 +83,21 @@ echo   - Upgrading pip...
 echo   - Auto-installing studio dependencies...
 "%VENV_PY%" -m pip install -r "%SCRIPT_DIR%\requirements-studio.txt"
 if errorlevel 1 echo   [WARNING] Some packages failed to install; retrying core requirements...
-if errorlevel 1 "%VENV_PY%" -m pip install fastapi uvicorn pillow numpy uharfbuzz khmercut opencv-python-headless imageio-ffmpeg
+if errorlevel 1 "%VENV_PY%" -m pip install fastapi "uvicorn[standard]" python-multipart "pillow>=10.4.0" numpy uharfbuzz khmercut opencv-python-headless imageio-ffmpeg edge-tts ffmpeg-python pysubs2
 echo   - Studio dependencies installed.
 goto VENV_DONE
 
 :VENV_READY
 echo   - Virtual environment ready: %VENV_DIR%
+:: Verify essential dependencies are installed (in case previous install failed or was partial)
+"%VENV_PY%" -c "import multipart, fastapi, uvicorn, PIL, cv2" >nul 2>&1
+if errorlevel 1 (
+  echo   - Missing dependencies detected in .venv-studio (e.g. python-multipart).
+  echo   - Completing installation of studio dependencies...
+  "%VENV_PY%" -m pip install -r "%SCRIPT_DIR%\requirements-studio.txt"
+  if errorlevel 1 "%VENV_PY%" -m pip install fastapi "uvicorn[standard]" python-multipart "pillow>=10.4.0" numpy uharfbuzz khmercut opencv-python-headless imageio-ffmpeg edge-tts ffmpeg-python pysubs2
+  echo   - Virtual environment dependencies updated.
+)
 goto VENV_DONE
 
 :VENV_FAIL
