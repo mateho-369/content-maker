@@ -297,8 +297,17 @@ export function Wizard({ onClose, onCreated }: { onClose: () => void; onCreated:
             <b>TTS Voice Model / Profile</b>
             <select value={voiceId} onChange={(e) => setVoiceId(e.target.value)} style={{ marginTop: 6 }}>
               <option value="">House Khmer Voice (Local Sherpa MMS-TTS)</option>
-              {voices.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
+              {voices.map((v) => (
+                <option key={v.id} value={v.id}>
+                  {v.name}{v.engine === "edge_tts" ? " ⚡ Cloud Neural" : v.engine === "rvc" ? " 🎤 RVC Clone" : ""}
+                </option>
+              ))}
             </select>
+            {voiceId && voices.find(v => v.id === voiceId)?.engine === "edge_tts" && (
+              <div className="hint" style={{ marginTop: 4, color: "#4caf50" }}>
+                ⚡ Edge-TTS uses Microsoft's neural voices — no GPU required, works instantly!
+              </div>
+            )}
           </div>
         )}
 

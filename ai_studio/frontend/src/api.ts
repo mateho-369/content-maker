@@ -160,10 +160,12 @@ export interface StylePreview {
 }
 
 export interface VoiceProfile {
-  id: string; name: string; pth_path: string; index_path: string; sample_path: string;
-  sample_seconds: number; engine: string; pitch: number; index_rate: number; rms_mix_rate: number;
-  f0_method: string; notes: string; training_status: string; created_at: number;
+  id: string; name: string; pth_path?: string; index_path?: string; sample_path?: string;
+  sample_seconds?: number; engine?: string; pitch?: number; index_rate?: number; rms_mix_rate?: number;
+  f0_method?: string; notes?: string; training_status?: string; created_at?: number;
   pth_exists?: boolean; index_exists?: boolean; sample_url?: string;
+  voice_code?: string; gender?: string; language?: string; quality?: string;
+  requires_gpu?: boolean; built_in?: boolean;
 }
 
 export interface CharacterActionMeta {

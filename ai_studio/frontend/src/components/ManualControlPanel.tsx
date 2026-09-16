@@ -1,4 +1,5 @@
 import React, { useState, useCallback } from "react";
+import { VoiceProfile } from "../api";
 
 interface ManualControlPanelProps {
   script: string;
@@ -32,6 +33,9 @@ interface ManualControlPanelProps {
   onRun: () => void;
   rvcAvailable?: boolean;
   gpuAvailable?: boolean;
+  voices?: VoiceProfile[];
+  selectedVoice?: string;
+  onSelectedVoiceChange?: (voiceId: string) => void;
 }
 
 const ALL_STAGES = [
@@ -78,6 +82,9 @@ export function ManualControlPanel({
   onRun,
   rvcAvailable = false,
   gpuAvailable = false,
+  voices = [],
+  selectedVoice = "",
+  onSelectedVoiceChange = () => {},
 }: ManualControlPanelProps) {
   const [autoSplitting, setAutoSplitting] = useState(false);
 
@@ -211,6 +218,26 @@ export function ManualControlPanel({
             <option value="meme">meme / reaction</option>
             <option value="generated_video">AI video</option>
           </select>
+        </div>
+        <div>
+          <div style={{ fontSize: 11, marginBottom: 4 }}>🎙️ TTS Voice:</div>
+          <select
+            value={selectedVoice}
+            onChange={(e) => onSelectedVoiceChange && onSelectedVoiceChange(e.target.value)}
+            style={{ width: "100%", padding: "4px 6px", fontSize: 11, background: "#161b22", border: "1px solid #30363d", borderRadius: 4, color: "#c9d1d9" }}
+          >
+            <option value="">House Khmer Voice (Local Sherpa MMS-TTS)</option>
+            {voices.map((v) => (
+              <option key={v.id} value={v.id}>
+                {v.name}{v.engine === "edge_tts" ? " ⚡ Cloud Neural" : v.engine === "rvc" ? " 🎤 RVC Clone" : ""}
+              </option>
+            ))}
+          </select>
+          {selectedVoice && voices.find(v => v.id === selectedVoice)?.engine === "edge_tts" && (
+            <div className="hint" style={{ marginTop: 4, color: "#4caf50", fontSize: 10 }}>
+              ⚡ Edge-TTS uses Microsoft's neural voices — no GPU required!
+            </div>
+          )}
         </div>
         <div>
           <div style={{ fontSize: 11, marginBottom: 4 }}>⬜ Default Background:</div>
