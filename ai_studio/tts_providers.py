@@ -343,6 +343,18 @@ def list_providers(cfg: dict) -> list[dict]:
     return out
 
 
+def list_emotional_styles() -> list[dict]:
+    """The delivery styles the post-processing understands, for pickers.
+
+    Keys + the knobs each one drives, so the UI shows what a style does instead
+    of a bare word list (`engines.tts.status` only exposes the names).
+    """
+    return [{"id": key, "label": key.capitalize(), "desc": st.get("desc", ""),
+             "speed": st.get("speed"), "pitch_semitones": st.get("pitch_semitones"),
+             "energy": st.get("energy"), "pause_factor": st.get("pause_factor")}
+            for key, st in EMOTIONAL_STYLES.items()]
+
+
 def synthesize_speech(text: str, out_wav: str, cfg: dict,
                       provider_id: str = "auto",
                       emotion: str = "calm",

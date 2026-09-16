@@ -57,9 +57,9 @@ def deterministic_breakdown(script, cfg, plan_scenes=None, content_type="explain
                 visual = visual or v2
                 mood = mood or m2
             meta = dict(s.get("meta") or {})
-            # Director's per-scene production flags survive re-segmentation
-            meta = {k: v for k, v in meta.items()
-                    if k in ("visual_source", "render_mode", "character_id", "side", "content_type")}
+            # every meta key the Director set survives — this used to be an
+            # allow-list, so action/prop/emotion/meme_type were erased from the
+            # board on the next run even when the save had kept them
             scenes.append({"index": len(scenes), "text": text, "visual_prompt": visual,
                            "mood_tag": mood, "estimated_duration_sec": round(est, 2),
                            "sfx_prompt": s.get("sfx_prompt") or style_mod.ambience_for(mood, visual),
@@ -67,7 +67,9 @@ def deterministic_breakdown(script, cfg, plan_scenes=None, content_type="explain
         if character_id:
             for sc in scenes:
                 sc["meta"].setdefault("character_id", character_id)
-        return scenes[:limit] if scenes else []
+        # a hand-authored board is never truncated: `max_scenes` caps how many
+        # scenes the *auto* segmenter may invent, it does not delete narration
+        return list(scenes) if scenes else []
 
     sentences = khmer.split_sentences(script, max_chars=max_chars)
     sentences = [khmer.strip_emoji_and_marks(s) for s in sentences]

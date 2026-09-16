@@ -328,15 +328,23 @@ class Database:
         con.execute("BEGIN")
         con.execute("DELETE FROM scenes WHERE project_id=?", (pid,))
         for i, s in enumerate(scenes):
+            # meta_json IS the scene meta. Callers hand us a scene dict whose
+            # production flags live under "meta", so fold that dict in and keep any
+            # other extra key (source/index/…). Storing it nested instead made every
+            # reader compensate (see list_scenes) and left a stray "meta" key inside
+            # the row, which the board then echoed back forever.
+            extra = {k: v for k, v in s.items()
+                     if k not in ("text", "visual_prompt", "mood_tag", "est_duration",
+                                  "estimated_duration_sec", "audio_duration", "sfx_prompt")}
+            nested = extra.pop("meta", None)
+            if isinstance(nested, dict):
+                extra = {**nested, **{k: v for k, v in extra.items() if v is not None}}
             con.execute(
                 "INSERT INTO scenes (project_id,idx,text,visual_prompt,mood_tag,est_duration,"
                 "audio_duration,sfx_prompt,meta_json) VALUES (?,?,?,?,?,?,?,?,?)",
                 (pid, i, s.get("text", ""), s.get("visual_prompt", ""), s.get("mood_tag", ""),
                  float(s.get("estimated_duration_sec") or s.get("est_duration") or 0),
-                 float(s.get("audio_duration") or 0), s.get("sfx_prompt", ""),
-                 jdump({k: v for k, v in s.items()
-                        if k not in ("text", "visual_prompt", "mood_tag", "estimated_duration_sec",
-                                     "audio_duration", "sfx_prompt")})))
+                 float(s.get("audio_duration") or 0), s.get("sfx_prompt", ""), jdump(extra)))
         con.execute("COMMIT")
         return self.list_scenes(pid)
 

@@ -179,11 +179,22 @@ export interface ContentDirectorAnalysis {
   critique: string[];
 }
 
+export interface QAIssue {
+  severity: string; check: string; issue: string; scene_idx?: number;
+}
+
 export interface QAResult {
   approved: boolean; fail_count: number; warn_count: number;
-  failures: Array<{ severity: string; check: string; issue: string; scene_idx?: number }>;
-  warnings: Array<{ severity: string; check: string; issue: string; scene_idx?: number }>;
+  failures: QAIssue[]; warnings: QAIssue[];
   total_scenes: number; mp4_verified: boolean;
+  estimated_duration?: number;
+  /** true when the project has no scenes to audit yet — a to-do, not a failure */
+  pending?: boolean;
+  /** the file the container check looked at ('' = never rendered) */
+  final_mp4?: string;
+  /** true when a render existed to inspect (it may still have failed) */
+  mp4_checked?: boolean;
+  content_type?: string; project_id?: string;
 }
 
 export const EMPTY_PROJECT = {} as Project;

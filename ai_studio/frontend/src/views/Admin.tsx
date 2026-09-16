@@ -163,8 +163,15 @@ function Team({ status }: { status: StatusPayload | null }) {
               onChange={(e) => saveRole(role, { enabled: e.target.checked })} />
             <div className="s-name">{settings.llm_roles?.labels?.[role] || role}</div>
             <select value={rc.model || ""} onChange={(e) => saveRole(role, { model: e.target.value })} style={{ width: 220 }}>
-              {(models.length ? models : [rc.model || "sailor2:8b", rc.fallback_model]).map((m) =>
-                <option key={m} value={m}>{m}</option>)}
+              {/* with Ollama offline `models` is empty, and this fallback pair put an
+                  `undefined` in the list → key={undefined} on every role row (React's
+                  unique-key warning) plus a clickable "undefined" model choice */}
+              {(() => {
+                const opts = Array.from(new Set(
+                  (models.length ? models : [rc.model, rc.fallback_model, "sailor2:8b"])
+                    .filter(Boolean).map(String)));
+                return opts.map((m) => <option key={m} value={m}>{m}</option>);
+              })()}
             </select>
             <input value={rc.temperature ?? 0.6} type="number" step={0.05} style={{ width: 80 }}
               onChange={(e) => saveRole(role, { temperature: parseFloat(e.target.value) })} />

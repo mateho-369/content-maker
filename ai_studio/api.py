@@ -359,56 +359,105 @@ async def api_scenes(project_id: str):
 @router.post("/projects/{project_id}/scenes")
 async def api_save_scenes(project_id: str, payload: dict = Body(...)):
     """The editable storyboard. Text edits are allowed (Director is senior) and
-    re-verified against the locked script if the scene list no longer matches."""
+    re-verified against the locked script if the scene list no longer matches.
+
+    Contract for the manual (MANUAL Override) workflow, which is the only writer
+    here: whatever the board shows is what gets stored. `scene.meta` is kept in
+    full — the renderers read visual_source, render_mode, character_action, prop,
+    emotion_style and meme_type from it — and anything the studio cannot render is
+    a 400 that names the scene and the fix, never a silent rewrite.
+    """
     st = get_state()
     proj = st.db.get_project(project_id)
     if not proj:
         raise HTTPException(404, "project not found")
     scenes = payload.get("scenes") or []
+    if not isinstance(scenes, list):
+        raise HTTPException(400, "body must be {\"scenes\": [...]}")
     clean = []
-    for s in scenes:
-        text = khmer.normalize_block(s.get("text") or "")
+    for n, s in enumerate(scenes, start=1):
+        where = f"scene {n}"
+        if not isinstance(s, dict):
+            raise HTTPException(400, f"{where}: expected an object, got {type(s).__name__}")
+        text = khmer.normalize_block(str(s.get("text") or ""))
         if not text:
-            continue
-        meta = dict(s.get("meta") or {})
-        visual_source = str(meta.get("visual_source") or "generated_video")
-        if visual_source not in ("generated_video", "illustration", "character_demo"):
-            visual_source = "generated_video"
+            # A blank row on the board is a scene the Director is still writing,
+            # not a deletion: dropping it silently meant "+ add scene" followed by
+            # a save habitually ate the rows. Name it and let them fix it.
+            raise HTTPException(400, f"{where} has no narration — fill it in, or remove the "
+                                     "row with ✕ (an empty scene renders as silence)")
+        raw_meta = s.get("meta") or {}
+        if not isinstance(raw_meta, dict):
+            raise HTTPException(400, f"{where}: meta must be an object")
+        meta = dict(raw_meta)
+        # `list_scenes` flattens a scene whose meta_json wrapped its own meta key
+        # (a quirk of replace_scenes packing every extra key in there), so the
+        # echoed-back board carries a redundant nested copy. Drop it here instead of
+        # letting every project grow one permanently.
+        meta.pop("meta", None)
+        # Validate, and refuse out loud: the old code computed a whitelisted
+        # fallback for visual_source/render_mode and then threw it away, storing
+        # whatever the client sent — so "spinning" or a typo'd source reached Stage 4
+        # untouched, and the failure showed up scenes later as a deferred/blank shot.
+        visual_source = str(meta.get("visual_source") or "")
+        if visual_source and visual_source not in content_mod.VISUAL_SOURCES:
+            raise HTTPException(
+                400, f"{where}: visual_source '{visual_source}' is not a source the studio can "
+                     f"render — pick one of {', '.join(content_mod.VISUAL_SOURCES)}")
         render_mode = str(meta.get("render_mode") or "broll")
-        if render_mode not in ("broll", "talking_head"):
-            render_mode = "broll"
-        if render_mode == "talking_head" and not (meta.get("character_id")
-                                                  or proj.get("character_id")):
-            raise HTTPException(400, "render_mode 'talking_head' needs a character on the project "
-                                     "or this scene")
-        if visual_source == "character_demo" and not (meta.get("character_id")
-                                                      or proj.get("character_id")):
-            raise HTTPException(400, "visual_source 'character_demo' needs a character on the "
-                                     "project or this scene — choose video or illustration")
-        if "character_id" in meta and meta.get("character_id"):
-            if not st.db.get_character(meta["character_id"]):
-                raise HTTPException(400, f"scene {len(clean) + 1}: unknown character_id")
+        if render_mode not in content_mod.RENDER_MODES:
+            raise HTTPException(400, f"{where}: render_mode '{render_mode}' must be "
+                                     f"{', '.join(content_mod.RENDER_MODES)}")
+        has_char = bool(meta.get("character_id") or proj.get("character_id"))
+        if not has_char and (render_mode == "talking_head" or visual_source == "character_demo"):
+            what = ("render_mode 'talking_head'" if render_mode == "talking_head"
+                    else "visual_source 'character_demo'")
+            raise HTTPException(400, f"{where}: {what} needs a character — add one under "
+                                     "🧑 Characters and pick it on the project (or set "
+                                     "character_action/illustration for this scene)")
+        if meta.get("character_id") and not st.db.get_character(meta["character_id"]):
+            raise HTTPException(400, f"{where}: character_id '{meta['character_id']}' is not a "
+                                     "saved character — choose one under 🧑 Characters")
+        meta["render_mode"] = render_mode
+
+        def num(key, lo=0.0, hi=600.0):
+            """A board cell can hold "" or a stray string; that is a 400 with the
+            field name, not a 500 traceback out of float()."""
+            raw = s.get(key)
+            try:
+                val = 0.0 if raw in (None, "") else float(raw)
+            except (TypeError, ValueError):
+                raise HTTPException(400, f"{where}: {key} must be a number of seconds "
+                                         f"(got {raw!r})")
+            return max(lo, min(hi, round(val, 3)))
+
         clean.append({"text": text,
-                      "visual_prompt": khmer.clip_clusters((s.get("visual_prompt") or "").strip(), 600),
-                      "mood_tag": khmer.clip_clusters((s.get("mood_tag") or "").strip(), 40),
-                      "estimated_duration_sec": float(s.get("estimated_duration_sec") or 0),
-                      "audio_duration": float(s.get("audio_duration") or 0),
-                      "sfx_prompt": khmer.clip_clusters((s.get("sfx_prompt") or "").strip(), 300),
-                      "meta": {k: v for k, v in meta.items()
-                               if k in ("visual_source", "render_mode", "character_id", "side")}})
+                      "visual_prompt": khmer.clip_clusters(str(s.get("visual_prompt") or "").strip(), 600),
+                      "mood_tag": khmer.clip_clusters(str(s.get("mood_tag") or "").strip(), 40),
+                      "estimated_duration_sec": num("estimated_duration_sec", 0.0, 600.0),
+                      "audio_duration": num("audio_duration", 0.0, 600.0),
+                      "sfx_prompt": khmer.clip_clusters(str(s.get("sfx_prompt") or "").strip(), 300),
+                      # every meta key is kept (nothing here filters): action, prop,
+                      # emotion, meme_type and the stage-written keys all have to
+                      # survive the save for the board to mean anything
+                      "meta": meta})
     if not clean:
-        raise HTTPException(400, "no usable scenes")
+        raise HTTPException(400, "the board is empty — add a scene (\"+ add scene\") or paste a "
+                                 "script (\"⤓ import script\") first")
     st.db.replace_scenes(project_id, clean)
     write_json(os.path.join(st.data_root, "projects", project_id, "02_scenes.json"),
                {"engine": "director-board", "scenes": clean})
-    note = "storyboard saved"
+    saved = st.db.get_project(project_id)
+    note = f"storyboard saved · {len(clean)} scene(s)"
     if (proj.get("mode") or "A").upper() == "A":
         ok = khmer.equal_text(khmer.join_sentences([s["text"] for s in clean]), proj["script"])
         note += " · wording matches the Director's script" if ok else \
                 " · ⚠ wording now differs from the original paste"
+    # scenes + project come back so the board can adopt what was actually stored
+    # (idx renumbered, meta normalised) without refetching the whole project
     return {"scenes": st.db.list_scenes(project_id), "note": note,
-            "integrity": _integrity_report(st.db.get_project(project_id),
-                                           st.db.list_scenes(project_id))}
+            "project": {k: v for k, v in saved.items() if k != "scenes"},
+            "integrity": _integrity_report(saved, st.db.list_scenes(project_id))}
 
 
 # ============================================================== idea (Mode B)
@@ -1461,22 +1510,52 @@ async def api_tts_providers_and_styles():
     st = get_state()
     from . import tts_providers as tp
     return {
-        "providers": tp.list_providers(st.cfg if st else {}),
+        # StudioState exposes config(), not a .cfg attribute — `st.cfg` raised
+        # AttributeError on every call to this endpoint.
+        "providers": tp.list_providers(st.config() if st else {}),
         "emotional_styles": tp.list_emotional_styles(),
     }
 
 
 @router.get("/qa/project/{project_id}")
 async def api_qa_project(project_id: str):
+    """The QA Gate over a project's script, scenes and (if rendered) final MP4.
+
+    Two contracts this endpoint used to break, both visible from the UI:
+
+    * a project with no scenes yet is NOT a 404. The panel calls this on mount,
+      so opening a draft or a freshly created project used to throw a red
+      "Project or scenes not found" toast at a user who had done nothing wrong.
+      It answers 200 with a complete payload (`pending: true`, every array
+      present) so the panel can say "nothing to audit yet" instead of crashing
+      on a missing field;
+    * 404 is reserved for a project that genuinely does not exist.
+    """
     st = get_state()
-    scenes = st.db.list_scenes(project_id)
-    if not scenes:
-        raise HTTPException(status_code=404, detail="Project or scenes not found")
+    proj = st.db.get_project(project_id)
+    if not proj:
+        raise HTTPException(status_code=404, detail="project not found")
 
     from . import qa as qa_engine
-    final_mp4 = st.final_video(project_id) if hasattr(st, "final_video") else None
-    ct = st.db.get_project(project_id).get("settings", {}).get("content_type", "explainer")
-    res = qa_engine.run_full_project_qa(scenes, final_mp4, content_type=ct)
+    scenes = st.db.list_scenes(project_id)
+    # "" (never rendered) and "gone from disk" are different facts: pass both
+    # through and let the gate report them, rather than skipping the check.
+    final_mp4 = st.final_video(project_id)
+    ct = content_mod.normalize(proj.get("content_type")
+                               or (proj.get("settings") or {}).get("content_type")
+                               or "explainer")
+    res = qa_engine.run_full_project_qa(scenes, final_mp4, content_type=ct) if scenes else {
+        # an empty draft has nothing to fail — say so in the same shape, so the
+        # panel never has to guess which keys exist
+        "approved": False, "fail_count": 0, "warn_count": 1,
+        "failures": [], "warnings": [{"severity": "warn", "check": "structure",
+                                      "issue": "No scenes yet — run the pipeline to break the "
+                                               "script into scenes before auditing."}],
+        "total_scenes": 0, "estimated_duration": 0.0, "mp4_verified": False,
+    }
+    res.update({"project_id": project_id, "content_type": ct,
+                "pending": not scenes,        # nothing to audit ≠ a failed audit
+                "final_mp4": final_mp4, "mp4_checked": bool(final_mp4)})
     return res
 
 

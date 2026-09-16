@@ -255,7 +255,16 @@ async def stage_breakdown(ctx, _idx):
     if not scenes:
         return {"ok": False, "error": "segmentation produced no scenes"}
     limit = int(ctx.cfg["pipeline"].get("max_scenes", 12))
-    scenes = scenes[:limit]
+    board_note = ""
+    if board:
+        # A board the Director edited is authoritative: `max_scenes` bounds what
+        # the auto segmenter may invent, it must not delete their scenes (a
+        # 15-scene manual board used to lose scenes 13-15 with no message).
+        if len(scenes) > limit:
+            board_note = (f"board kept at {len(scenes)} scenes — pipeline.max_scenes ({limit}) "
+                          "applies to auto segmentation only")
+    else:
+        scenes = scenes[:limit]
     scenes = _tag_sides(scenes, ctx)
     for i, s in enumerate(scenes):
         s["idx"] = i
@@ -286,6 +295,8 @@ async def stage_breakdown(ctx, _idx):
                                            "estimated_duration_sec")} for sc in scenes])[:4000])
     est = round(sum(float(s.get("estimated_duration_sec") or 0) for s in scenes), 1)
     notes = list(meta.get("notes") or [])
+    if board_note:
+        notes.append(board_note)
     integrity = meta.get("integrity") or {}
     if integrity.get("ok") is False:
         notes.append("⚠️ scene text did not match the Director's script exactly")

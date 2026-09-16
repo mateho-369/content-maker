@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { api, Asset, Project, Run, Scene, StageRow, StageSpec, StylePreview } from "../api";
+import { ApiError, api, Asset, Project, QAResult, Run, Scene, StageRow, StageSpec, StylePreview } from "../api";
 import { useToast, errText } from "../main";
-import { Badge, Bar, Empty, Panel, StatusBadge, fmtDur, fmtSize, fmtTime, Spinner } from "../ui";
+import { Badge, Bar, Empty, Modal, Panel, StatusBadge, fmtDur, fmtSize, fmtTime, Spinner } from "../ui";
 import { CaptionStudio } from "./CaptionStudio";
 
 interface Live {
@@ -42,6 +42,34 @@ export function ProjectView({ projectId, onOpen }: { projectId: string; onOpen: 
 
   useEffect(() => { load(); }, [load]);
 
+  // A board save returns exactly what was stored (idx renumbered, meta kept), so
+  // the view adopts that instead of refetching project + settings + assets — the
+  // three round trips per dropdown click were the "editing scene text lags".
+  const adoptBoard = useCallback((project: Project, sc: Scene[]) => {
+    setProj((prev) => ({ ...(prev as Project), ...project, scenes: sc }));
+  }, []);
+
+  // one snapshot fetch, three outcomes: data, "this run is gone", "retry".
+  const refresh = useCallback(async (runId: string): Promise<Live | null | "retry"> => {
+    try {
+      const s = await api<Live>(`/runs/${runId}/status?since=0`);
+      setLive(s); setLiveMode((m) => m || "poll");
+      return s;
+    } catch (e) {
+      // 404 is permanent — the run row is gone (other data dir, deleted or
+      // duplicated project, pruned history). Drop the live view, refetch the
+      // project so the board/buttons agree with the DB, and stop asking. The old
+      // `catch {}` treated it as transient, which is the 404-per-2s wall in the
+      // console (1200 ticks = 40 minutes of it).
+      if (e instanceof ApiError && e.status === 404) { setLive(null); setLiveMode(""); load(); return null; }
+      return "retry";
+    }
+  }, [load]);
+
+  const flush = useCallback(() => { /* placeholder for animation flush */ }, []);
+
+  useEffect(() => () => { wsRef.current?.close(); }, []);
+
   // live WS with SSE + polling fallback
   const connect = useCallback((runId: string) => {
     const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -53,26 +81,23 @@ export function ProjectView({ projectId, onOpen }: { projectId: string; onOpen: 
       try {
         const m = JSON.parse(ev.data);
         if (m.kind === "snapshot") { setLive(m.payload); if (m.payload?.status) flush(); }
-        else if (m.kind === "stage_update" || m.kind === "stage_failed") { setLive((x) => x || {}); refresh(runId); }
+        else if (m.kind === "stage_update" || m.kind === "stage_failed") {
+          setLive((x) => x || {}); refresh(runId);
+          // scenes are written by these two stages, so the board (and the
+          // "Scene board (0)" the manual workflow started from) only updates
+          // when the project itself is refetched — the live snapshot alone
+          // never carries them
+          if (m.kind === "stage_update" && ["script", "breakdown"].includes(m.stage)
+              && m.payload?.status === "done") load();
+        }
         else if (m.kind === "log") { setLog((x) => [...x.slice(-200), m.payload]); }
-        else if (m.kind === "run_finished") { setLive(m.payload); refresh(runId); }
+        else if (m.kind === "run_finished") { setLive(m.payload); refresh(runId); load(); }
       } catch {}
     };
     ws.onclose = () => { setLiveMode("poll"); /* SSE + polling keep it honest */ };
     wsRef.current = ws;
     return ws;
-  }, []);
-
-  const refresh = useCallback(async (runId: string) => {
-    try {
-      const s = await api<Live>(`/runs/${runId}/status?since=0`);
-      setLive(s); setLiveMode((m) => m || "poll");
-    } catch {}
-  }, []);
-
-  const flush = useCallback(() => { /* placeholder for animation flush */ }, []);
-
-  useEffect(() => () => { wsRef.current?.close(); }, []);
+  }, [load, refresh]);
 
   const startRun = async (payload: any = {}) => {
     setBusy("starting");
@@ -89,13 +114,12 @@ export function ProjectView({ projectId, onOpen }: { projectId: string; onOpen: 
   const poll = useCallback(async (runId: string) => {
     for (let i = 0; i < 1200; i++) {
       await new Promise((r) => setTimeout(r, 2000));
-      try {
-        const s = await api<Live>(`/runs/${runId}/status?since=0`);
-        setLive(s); setLiveMode((m) => m || "poll");
-        if (s.status && !["running", "queued", "paused"].includes(s.status)) { load(); setLiveMode(""); return; }
-      } catch { /* transient */ }
+      const s = await refresh(runId);
+      if (s === null) return;                       // run vanished — refresh() recovered
+      if (s === "retry") continue;                  // network hiccup, next tick
+      if (s.status && !["running", "queued", "paused"].includes(s.status)) { load(); setLiveMode(""); return; }
     }
-  }, [load]);
+  }, [load, refresh]);
 
   const act = async (verb: string, path: string, body?: any, okMsg = "") => {
     setBusy(verb);
@@ -193,7 +217,7 @@ export function ProjectView({ projectId, onOpen }: { projectId: string; onOpen: 
               <PipelineDAG stages={stages} rows={runRows} onStage={(k) => setSelStage(k)} />
               <CaptionStudio projectId={proj.id} initial={capStyle} onChanged={load} />
               <SceneBoard proj={proj} scenes={sc} rows={runRows} assets={assets} sel={selScene}
-                onSel={setSelScene} onChanged={load} act={act} busy={busy} />
+                onSel={setSelScene} onChanged={load} onAdopt={adoptBoard} act={act} busy={busy} />
               <ScriptPanel proj={proj} onChanged={load} act={act} busy={busy} />
               <EventLog log={log} rows={runRows} />
             </>
@@ -303,34 +327,50 @@ function ContentDirectorPanel({ proj, scenes, onChanged }: { proj: Project; scen
   );
 }
 
-function QAGatePanel({ proj, scenes, assets }: { proj: Project; scenes: Scene[]; assets: Asset[] }) {
-  const [qaRes, setQaRes] = useState<any>(null);
+function QAGatePanel({ proj, scenes }: { proj: Project; scenes: Scene[]; assets: Asset[] }) {
+  const [qaRes, setQaRes] = useState<QAResult | null>(null);
   const [loading, setLoading] = useState(false);
   const toast = useToast();
 
-  const runQA = async () => {
+  const runQA = async (announce = true) => {
     setLoading(true);
     try {
-      const res = await api<any>(`/qa/project/${proj.id}`);
+      const res = await api<QAResult>(`/qa/project/${proj.id}`);
       setQaRes(res);
+      // Only an explicit click may toast. The mount-time call fires for every
+      // draft project, and "QA Gate flagged issues" on a project nobody has
+      // rendered yet is noise dressed up as a defect.
+      if (!announce || res?.pending) return;
       toast(res.approved ? "QA Gate Passed: Ready to Ship!" : "QA Gate flagged issues", res.approved ? "ok" : "warn");
     } catch (e) {
-      toast(errText(e), "err");
+      if (announce) toast(errText(e), "err");
     } finally {
       setLoading(false);
     }
   };
 
-  useEffect(() => { runQA(); }, [proj.id]);
+  useEffect(() => { runQA(false); }, [proj.id]);
+
+  // Never assume a field survived the round trip: reading `.some()` on an
+  // absent `failures` array used to blank the whole view.
+  const failures: any[] = qaRes?.failures || [];
+  const warnings: any[] = qaRes?.warnings || [];
+  const flagged = (list: any[], check: string) => list.some((x) => x?.check === check);
 
   return (
     <Panel title="Automated QA Gate · Pre-Delivery Compliance" right={
-      <button className="btn tiny primary" onClick={runQA} disabled={loading}>
+      <button className="btn tiny primary" onClick={() => runQA(true)} disabled={loading}>
         {loading ? "Auditing…" : "🛡️ Run Full QA Audit"}
       </button>
     }>
       <div className="panel-b">
-        {qaRes ? (
+        {qaRes?.pending ? (
+          <div className="hint">
+            Nothing to audit yet — this project has no scenes. Run the pipeline (Stage 1 breaks
+            the script into scenes) and the gate will check Khmer clusters, hook pacing, voice
+            levels and the final MP4 container.
+          </div>
+        ) : qaRes ? (
           <div>
             <div className="spread" style={{ marginBottom: 12 }}>
               <div>
@@ -340,7 +380,7 @@ function QAGatePanel({ proj, scenes, assets }: { proj: Project; scenes: Scene[];
                 </Badge>
               </div>
               <div className="hint">
-                {qaRes.total_scenes} scenes · {qaRes.fail_count} failures · {qaRes.warn_count} warnings
+                {qaRes.total_scenes ?? scenes.length} scenes · {failures.length} failures · {warnings.length} warnings
               </div>
             </div>
 
@@ -348,48 +388,50 @@ function QAGatePanel({ proj, scenes, assets }: { proj: Project; scenes: Scene[];
             <div className="cards" style={{ gridTemplateColumns: "repeat(3, 1fr)", marginBottom: 14 }}>
               <div className="ct-card">
                 <b>1. Khmer Typography & Subscripts</b>
-                <div style={{ marginTop: 4, color: qaRes.failures.some((f: any) => f.check === "khmer_clusters") ? "var(--red)" : "var(--green)" }}>
-                  {qaRes.failures.some((f: any) => f.check === "khmer_clusters") ? "❌ Broken Consonant Cluster" : "✓ Subscripts & HarfBuzz Normalization Valid"}
+                <div style={{ marginTop: 4, color: flagged(failures, "khmer_clusters") ? "var(--red)" : "var(--green)" }}>
+                  {flagged(failures, "khmer_clusters") ? "❌ Broken Consonant Cluster" : "✓ Subscripts & HarfBuzz Normalization Valid"}
                 </div>
               </div>
               <div className="ct-card">
                 <b>2. Script & Viral Hook</b>
-                <div style={{ marginTop: 4, color: qaRes.warnings.some((w: any) => w.check === "hook_pacing") ? "var(--yellow)" : "var(--green)" }}>
-                  {qaRes.warnings.some((w: any) => w.check === "hook_pacing") ? "⚠️ Scene 1 Hook Needs Tightening" : "✓ 1-3s Hook Optimized"}
+                <div style={{ marginTop: 4, color: flagged(warnings, "hook_pacing") ? "var(--yellow)" : "var(--green)" }}>
+                  {flagged(warnings, "hook_pacing") ? "⚠️ Scene 1 Hook Needs Tightening" : "✓ 1-3s Hook Optimized"}
                 </div>
               </div>
               <div className="ct-card">
                 <b>3. Final MP4 Container</b>
                 <div style={{ marginTop: 4, color: qaRes.mp4_verified ? "var(--green)" : "var(--tx2)" }}>
-                  {qaRes.mp4_verified ? "✓ 9:16 Vertical Video Valid" : "○ Export Pending"}
+                  {qaRes.mp4_verified ? "✓ 9:16 Vertical Video Valid"
+                    : qaRes.mp4_checked ? "❌ A render was found but it failed its checks"
+                    : "○ Nothing exported yet"}
                 </div>
               </div>
             </div>
 
-            {qaRes.failures.length > 0 && (
+            {failures.length > 0 && (
               <div className="errbar" style={{ marginBottom: 8 }}>
                 <b>Failures:</b>
                 <ul style={{ margin: "4px 0 0 16px", padding: 0 }}>
-                  {qaRes.failures.map((f: any, idx: number) => (
-                    <li key={idx}>[{f.check}] Scene {f.scene_idx !== undefined ? f.scene_idx + 1 : "General"}: {f.issue}</li>
+                  {failures.map((f: any, idx: number) => (
+                    <li key={idx}>[{f?.check}] Scene {f?.scene_idx !== undefined ? f.scene_idx + 1 : "General"}: {f?.issue}</li>
                   ))}
                 </ul>
               </div>
             )}
 
-            {qaRes.warnings.length > 0 && (
+            {warnings.length > 0 && (
               <div style={{ background: "#2e2a1d", border: "1px solid #665020", borderRadius: 4, padding: 8, color: "var(--yellow)" }}>
                 <b>Warnings:</b>
                 <ul style={{ margin: "4px 0 0 16px", padding: 0 }}>
-                  {qaRes.warnings.map((w: any, idx: number) => (
-                    <li key={idx}>[{w.check}] Scene {w.scene_idx !== undefined ? w.scene_idx + 1 : "General"}: {w.issue}</li>
+                  {warnings.map((w: any, idx: number) => (
+                    <li key={idx}>[{w?.check}] Scene {w?.scene_idx !== undefined ? w.scene_idx + 1 : "General"}: {w?.issue}</li>
                   ))}
                 </ul>
               </div>
             )}
           </div>
         ) : (
-          <div className="hint">Click "Run Full QA Audit" to verify all script clusters, voice loudness, and video assets.</div>
+          <div className="hint">{loading ? "Auditing…" : "Click \"Run Full QA Audit\" to verify all script clusters, voice loudness, and video assets."}</div>
         )}
       </div>
     </Panel>
@@ -433,35 +475,86 @@ function PipelineDAG({ stages, rows, onStage }: {
   );
 }
 
-function SceneBoard({ proj, scenes, rows, assets, sel, onSel, onChanged, act, busy }: {
+const BLANK_SCENE: Scene = { idx: 0, text: "", visual_prompt: "", mood_tag: "calm-warm",
+  estimated_duration_sec: 0, audio_duration: 0, sfx_prompt: "", meta: {} };
+
+function SceneBoard({ proj, scenes, rows, assets, sel, onSel, onChanged, onAdopt, act, busy }: {
   proj: Project; scenes: Scene[]; rows: StageRow[]; assets: Asset[]; sel: number; onSel: (i: number) => void;
-  onChanged: () => void; act: (v: string, p: string, b?: any, ok?: string) => Promise<any>; busy: string;
+  onChanged: () => void; onAdopt?: (project: Project, scenes: Scene[]) => void;
+  act: (v: string, p: string, b?: any, ok?: string) => Promise<any>; busy: string;
 }) {
   const toast = useToast();
   const [draft, setDraft] = useState<Scene[]>(scenes);
-  useEffect(() => { setDraft(scenes); }, [scenes]);
-  const save = async () => {
+  const [dirty, setDirty] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [paste, setPaste] = useState("");
+  const draftRef = useRef(draft); draftRef.current = draft;   // a queued save must post the latest rows
+  const timer = useRef<number | null>(null);
+  // re-seed only when the stored content changes: `scenes` got a new array
+  // identity on every live tick, which used to wipe half-typed narration
+  const sig = scenes.map((s) => `${s.text}\u0001${JSON.stringify(s.meta || {})}`).join("\u0002");
+  useEffect(() => { setDraft(scenes); setDirty(false); }, [sig]);
+  useEffect(() => () => { if (timer.current) window.clearTimeout(timer.current); }, []);
+
+  const save = useCallback(async (announce = true) => {
+    if (timer.current) { window.clearTimeout(timer.current); timer.current = null; }
+    const body = { scenes: draftRef.current.map((d) => ({ ...d, idx: undefined })) };
+    if (!body.scenes.length) {
+      toast("the board is empty — “+ add scene” makes a row, “⤓ import script” makes one per line", "warn");
+      return;
+    }
     try {
-      await api(`/projects/${proj.id}/scenes`, { method: "POST", json: { scenes: draft.map((d) => ({ ...d, idx: undefined })) } });
-      toast("storyboard saved", "ok"); onChanged();
-    } catch (e) { toast(errText(e), "err"); }
+      const r = await api<any>(`/projects/${proj.id}/scenes`, { method: "POST", json: body });
+      setDraft(r.scenes || []); setDirty(false);
+      if (r.project && onAdopt) onAdopt(r.project, r.scenes || []); else onChanged();
+      if (announce) toast(r.note || "storyboard saved", "ok");
+    } catch (e) { toast(errText(e), "err"); }   // a failed autosave still says so
+  }, [proj.id, onChanged, onAdopt]);
+
+  const queueSave = useCallback(() => {
+    setDirty(true);
+    if (timer.current) window.clearTimeout(timer.current);
+    // An unfinished row makes the whole save invalid (the server refuses rather
+    // than dropping it), so autosave waits for the Director to press save board —
+    // otherwise every picker click would answer with an error toast.
+    if (draftRef.current.some((r) => !String(r.text || "").trim())) return;
+    timer.current = window.setTimeout(() => { timer.current = null; save(false); }, 700);
+  }, [save]);
+
+  const edit = (mutate: (list: Scene[]) => Scene[], autosave = false) => {
+    setDraft(mutate(draftRef.current)); setDirty(true);
+    if (autosave) queueSave();
+  };
+  const addScene = (at?: number) => {
+    const i = at === undefined ? draftRef.current.length : at;
+    edit((x) => { const c = [...x]; c.splice(i, 0, { ...BLANK_SCENE, meta: {} }); return c; });
+    onSel(i);
+  };
+  const duplicateScene = (i: number) => edit((x) => {
+    const c = [...x]; c.splice(i + 1, 0, { ...c[i], meta: { ...(c[i].meta || {}) } }); return c;
+  });
+  const removeScene = (i: number) => {
+    edit((x) => x.filter((_, j) => j !== i));
+    toast("row removed — save board to drop it from the project", "info");
+  };
+  const moveScene = (i: number, dir: number) => edit((x) => {
+    const j = i + dir; if (j < 0 || j >= x.length) return x;
+    const c = [...x]; [c[i], c[j]] = [c[j], c[i]]; return c;
+  });
+  const importPaste = () => {
+    const lines = paste.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    if (!lines.length) return;
+    edit((x) => [...x, ...lines.map((text) => ({ ...BLANK_SCENE, text, meta: {} }))]);
+    setPaste(""); setImporting(false);
+    toast(`${lines.length} scene(s) added — save board to store them`, "ok");
   };
   const uploadImage = async (idx: number, f: File) => {
     const fd = new FormData(); fd.append("image", f);
     try { await api(`/projects/${proj.id}/scenes/${idx}/image`, { method: "POST", form: fd }); toast("scene image uploaded", "ok"); onChanged(); }
     catch (e) { toast(errText(e), "err"); }
   };
-  const patchScene = async (idx: number, meta: Record<string, any>) => {
-    const sc = draft[idx]; if (!sc) return;
-    await saveWith(async () => {
-      const next = draft.map((s, i) => i === idx ? { ...s, meta: { ...s.meta, ...meta } } : s);
-      setDraft(next);
-    });
-  };
-  const saveWith = async (mutate?: () => void) => {
-    if (mutate) mutate();
-    await save();
-  };
+  const patchScene = (idx: number, meta: Record<string, any>) =>
+    edit((x) => x.map((s, i) => i === idx ? { ...s, meta: { ...s.meta, ...meta } } : s), true);
   const stageFor = (idx: number, stage: string) => rows.find((r) => r.stage === stage && r.scene_idx === idx);
 
   // content-type structure grouping: compare → A / B / summary; word_nuance → meaning-1 / meaning-2 / contrast
@@ -489,17 +582,35 @@ function SceneBoard({ proj, scenes, rows, assets, sel, onSel, onChanged, act, bu
   });
 
   return (
-    <Panel title={`Scene board (${scenes.length})`}
-      right={<button className="btn tiny primary" onClick={save} disabled={busy === "board"}>save board</button>}>
+    <Panel title={`Scene board (${draft.length}${dirty ? " · unsaved" : ""})`}
+      right={<div className="row" style={{ gap: 4 }}>
+        <button className="btn tiny" onClick={() => addScene()} title="append one empty scene">+ add scene</button>
+        <button className="btn tiny" onClick={() => setImporting(true)} title="paste a script: one line = one scene">⤓ import script</button>
+        <button className={`btn tiny ${dirty ? "primary" : ""}`} onClick={() => save(true)} disabled={busy === "board"}>
+          {dirty ? "save board ●" : "save board"}
+        </button>
+      </div>}>
+      {!draft.length ? (
+        <div className="panel-b" style={{ padding: "20px 12px", textAlign: "center" }}>
+          <div className="hint" style={{ marginBottom: 10 }}>
+            Nothing on the board yet — one line of narration per scene.{" "}
+            {proj.script ? "“⤓ import script” turns the saved script into rows." : " Paste the script first, then import it."}
+          </div>
+          <div className="row" style={{ justifyContent: "center", gap: 6 }}>
+            <button className="btn tiny primary" onClick={() => addScene(0)}>+ add scene</button>
+            <button className="btn tiny" onClick={() => setImporting(true)}>⤓ import script</button>
+          </div>
+        </div>
+      ) : (
       <table className="grid">
         <thead>
           <tr>
-            <th style={{ width: 25 }}>#</th>
+            <th style={{ width: 76 }}>#</th>
             <th>narration</th>
             <th style={{ width: 140 }}>action & prop</th>
             <th style={{ width: 110 }}>emotion</th>
             <th style={{ width: 130 }}>visual source</th>
-            <th style={{ width: 60 }}>⏱</th>
+            <th style={{ width: 62 }}>⏱</th>
             <th style={{ width: 110 }}>production</th>
           </tr>
         </thead>
@@ -507,61 +618,90 @@ function SceneBoard({ proj, scenes, rows, assets, sel, onSel, onChanged, act, bu
           {grouped.map((g, gi) => (
             <React.Fragment key={gi}>
               {g.label && <tr className="group-head"><td colSpan={7}>{g.label}</td></tr>}
-              {g.items.map((s, i) => {
+              {g.items.map((si) => {
+                // `grouped[].items` holds SCENE INDICES. The row used to treat that
+                // number as the scene object and use the group-relative counter as
+                // the row id — so on a grouped board (compare / word_nuance /
+                // myth_vs_fact / choose) every cell read `undefined`, the pickers
+                // showed defaults, and each edit wrote to the wrong scene.
+                const s = draft[si];
+                if (!s) return null;
                 const vs = s.meta?.visual_source || (hasChar(proj, s) ? "character_action" : "illustration");
+                const stop = (e: React.MouseEvent) => e.stopPropagation();
+                const sel2 = (fn: () => void) => (e: React.MouseEvent) => { stop(e); fn(); };
                 return (
-                  <tr key={i} onClick={() => onSel(i)} style={{ cursor: "pointer", background: sel === i ? "#242a35" : undefined }}>
-                    <td><b>{i + 1}</b>{s.meta?.side ? <><br /><Badge>{s.meta.side}</Badge></> : null}</td>
+                  <tr key={si} onClick={() => onSel(si)} style={{ cursor: "pointer", background: sel === si ? "#242a35" : undefined }}>
+                    <td>
+                      <b>{si + 1}</b>
+                      {s.meta?.side ? <><br /><Badge>{s.meta.side}</Badge></> : null}
+                      <div className="row" style={{ gap: 2, marginTop: 3 }}>
+                        <button className="btn tiny" title="duplicate this scene" onClick={sel2(() => duplicateScene(si))}>⧉</button>
+                        <button className="btn tiny" title="move up" onClick={sel2(() => moveScene(si, -1))}>↑</button>
+                        <button className="btn tiny" title="move down" onClick={sel2(() => moveScene(si, 1))}>↓</button>
+                        <button className="btn tiny" title="remove this row (save board to apply)" onClick={sel2(() => removeScene(si))}>✕</button>
+                      </div>
+                    </td>
                     <td>
                       <textarea className="scene-text" lang="km" spellCheck={false} value={s.text} rows={2}
-                        onChange={(e) => setDraft(draft.map((x, j) => j === i ? { ...x, text: e.target.value } : x))} />
+                        onChange={(e) => edit((x) => x.map((y, j) => j === si ? { ...y, text: e.target.value } : y))} />
                       {s.meta?.character_id ? <div className="hint">🧑 {s.meta.character_id.slice(0, 10)}</div> : null}
                     </td>
                     <td>
                       <select value={s.meta?.character_action || "talking"} style={{ width: "100%", padding: "2px 4px", fontSize: 11 }}
-                        onChange={(e) => patchScene(i, { character_action: e.target.value })}>
+                        onChange={(e) => patchScene(si, { character_action: e.target.value })}>
                         {ACTIONS.map((a) => <option key={a} value={a}>🎭 {a}</option>)}
                       </select>
                       <select value={s.meta?.prop || "none"} style={{ width: "100%", padding: "2px 4px", fontSize: 11, marginTop: 3 }}
-                        onChange={(e) => patchScene(i, { prop: e.target.value })}>
-                        {PROPS.map((p) => <option key={p} value={p}>📦 {p}</option>)}
+                        onChange={(e) => patchScene(si, { prop: e.target.value })}>
+                        {PROPS.map((pr) => <option key={pr} value={pr}>📦 {pr}</option>)}
                       </select>
                     </td>
                     <td>
-                      <select value={s.meta?.emotion_style || s.mood_tag || "calm"} style={{ width: "100%", padding: "2px 4px", fontSize: 11 }}
-                        onChange={(e) => patchScene(i, { emotion_style: e.target.value })}>
+                      {/* a mood slug ("calm-warm", "rain-soft") is NOT an emotion style:
+                          feeding it to this select gave a controlled value with no matching
+                          option, so the row displayed "calm" while the DB said something else.
+                          Show the style that will actually be applied, keep the mood visible. */}
+                      <select value={s.meta?.emotion_style || (EMOTIONS.includes(s.mood_tag) ? s.mood_tag : "calm")}
+                        style={{ width: "100%", padding: "2px 4px", fontSize: 11 }}
+                        onChange={(e) => patchScene(si, { emotion_style: e.target.value })}>
                         {EMOTIONS.map((em) => <option key={em} value={em}>🎙️ {em}</option>)}
                       </select>
+                      {s.mood_tag && s.mood_tag !== s.meta?.emotion_style ? <div className="hint" style={{ fontSize: 10 }}>mood: {s.mood_tag}</div> : null}
                     </td>
                     <td>
                       <VisualSourceControl value={vs} hasChar={hasChar(proj, s)}
-                        onChange={(v) => patchScene(i, { visual_source: v })} />
+                        onChange={(v) => patchScene(si, { visual_source: v })} />
                       {vs === "meme" && (
                         <select value={s.meta?.meme_type || "reaction_shock"} style={{ width: "100%", padding: "2px 4px", fontSize: 11, marginTop: 3 }}
-                          onChange={(e) => patchScene(i, { meme_type: e.target.value })}>
+                          onChange={(e) => patchScene(si, { meme_type: e.target.value })}>
                           {MEMES.map((m) => <option key={m} value={m}>⚡ {m.replace("reaction_", "")}</option>)}
                         </select>
                       )}
                     </td>
-                    <td className="mono">{fmtDur(s.estimated_duration_sec)}</td>
+                    <td className="mono">
+                      {fmtDur(s.estimated_duration_sec)}
+                      <input type="number" min={1} max={30} step={0.5} title="planned scene length (s)"
+                        value={s.estimated_duration_sec || ""} style={{ width: "100%", marginTop: 3, padding: "1px 4px", fontSize: 11 }}
+                        onChange={(e) => edit((x) => x.map((y, j) => j === si ? { ...y, estimated_duration_sec: Number(e.target.value) || 0 } : y))} />
+                    </td>
                     <td>
                       {hasChar(proj, s) && (
                         <div className="row" style={{ marginBottom: 3 }}>
                           <select value={s.meta?.render_mode || "broll"} style={{ width: "100%", padding: "2px 4px", fontSize: 11 }}
-                            onChange={(e) => patchScene(i, { render_mode: e.target.value })}>
+                            onChange={(e) => patchScene(si, { render_mode: e.target.value })}>
                             <option value="broll">b-roll</option><option value="talking_head">talking head</option>
                           </select>
                         </div>
                       )}
                       <div className="row" style={{ gap: 4 }}>
-                        <input type="file" accept="image/*" style={{ display: "none" }} id={`img-${i}`}
-                          onChange={(e) => e.target.files?.[0] && uploadImage(i, e.target.files[0])} />
-                        <button className="btn tiny" onClick={() => document.getElementById(`img-${i}`)?.click()}>⬆ img</button>
-                        <a className="btn tiny" href={`/api/projects/${proj.id}/scene/${i}/download`}>zip</a>
+                        <input type="file" accept="image/*" style={{ display: "none" }} id={`img-${si}`}
+                          onChange={(e) => e.target.files?.[0] && uploadImage(si, e.target.files[0])} />
+                        <button className="btn tiny" onClick={sel2(() => document.getElementById(`img-${si}`)?.click())}>⬆ img</button>
+                        <a className="btn tiny" href={`/api/projects/${proj.id}/scene/${si}/download`} onClick={stop}>zip</a>
                       </div>
                       <div className="hint" style={{ marginTop: 3, fontSize: 10 }}>
                         {["voice_final", "video", "video_fit", "ambient"].map((k) => {
-                          const r = stageFor(i, k);
+                          const r = stageFor(si, k);
                           return r ? <span key={k}>{k.replace("_final", "").replace("_fit", "")}:{r.status[0]} </span> : null;
                         })}
                       </div>
@@ -573,6 +713,24 @@ function SceneBoard({ proj, scenes, rows, assets, sel, onSel, onChanged, act, bu
           ))}
         </tbody>
       </table>
+      )}
+      {importing && (
+        <Modal title="import a script · one line = one scene" onClose={() => setImporting(false)}>
+          <textarea className="scene-text" lang="km" rows={12} style={{ width: "100%", fontFamily: "inherit" }}
+            value={paste} onChange={(e) => setPaste(e.target.value)}
+            placeholder={"each non-empty line becomes one scene\nMode A keeps your wording exactly — nothing is rewritten"} />
+          <div className="spread" style={{ marginTop: 10 }}>
+            <span className="hint">
+              {paste.split(/\r?\n/).filter((l) => l.trim()).length} scene(s) · appended after scene {draft.length}
+            </span>
+            <div className="row" style={{ gap: 6 }}>
+              <button className="btn" onClick={() => setImporting(false)}>cancel</button>
+              <button className="btn primary" onClick={importPaste}
+                disabled={!paste.split(/\r?\n/).filter((l) => l.trim()).length}>add to board</button>
+            </div>
+          </div>
+        </Modal>
+      )}
     </Panel>
   );
 }
@@ -713,7 +871,9 @@ function Inspector({ proj, scenes, stage, scene, assets, rows, onChanged, act, b
   const srt = assets.find((x) => x.kind === "srt");
   const instProps = (x: Asset | undefined) => x && (
     <details key={x.kind} style={{ marginBottom: 6 }}>
-      <summary className="hint">{x.kind} · {x.engine || ""} · {fmtDur(x.duration)}</summary>
+      {/* the engine lives in meta.engine (there is no top-level column) — reading
+          x.engine printed an empty label for every asset, always */}
+      <summary className="hint">{x.kind} · {x.meta?.engine || ""} · {fmtDur(x.duration)}</summary>
       <video controls preload="metadata" src={`/api/assets/${x.id}/stream`} style={{ marginTop: 4 }} />
       <div className="row" style={{ gap: 4, marginTop: 4 }}>
         <a className="btn tiny" href={`/api/assets/${x.id}/download`}>download</a>

@@ -24,8 +24,14 @@ SR = 44100
 
 
 def probe(path):
-    """{duration, width, height, fps} for a video file — best effort."""
-    out = {"duration": media_duration(path, 0.0), "width": 0, "height": 0, "fps": 0.0}
+    """{duration, width, height, fps, has_video, has_audio} — best effort.
+
+    `has_audio` / `has_video` are only authoritative when ffmpeg actually ran
+    (they default to True in the early-return path, so a machine without ffmpeg
+    can never be told a stream is missing — the QA gate relies on that).
+    """
+    out = {"duration": media_duration(path, 0.0), "width": 0, "height": 0, "fps": 0.0,
+           "has_video": True, "has_audio": True}
     ff = ffmpeg_exe()
     if not ff or not path or not os.path.exists(path):
         return out
@@ -38,6 +44,9 @@ def probe(path):
         m = re.search(r"([\d.]+)\s*fps", txt)
         if m:
             out["fps"] = float(m.group(1))
+        if "Stream #" in txt:                      # only judge streams we could read
+            out["has_video"] = bool(re.search(r"Stream #\d+:\d+.*?: Video:", txt))
+            out["has_audio"] = bool(re.search(r"Stream #\d+:\d+.*?: Audio:", txt))
     except Exception:
         pass
     return out

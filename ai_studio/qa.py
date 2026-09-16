@@ -185,10 +185,15 @@ def validate_final_mp4(mp4_path: str, target_aspect: Tuple[int, int] = (9, 16)) 
     duration = info.get("duration", 0.0)
 
     has_video = width > 0 and height > 0
-    has_audio = True
+    # A silent export is exactly the kind of dud this gate exists to catch (an
+    # audio stage deferred on a CPU box, a mux that dropped the track), so the
+    # stream is actually looked for instead of assumed.
+    has_audio = bool(info.get("has_audio", True))
 
     if not has_video:
         issues.append({"severity": "fail", "check": "mp4", "issue": "MP4 contains no valid video stream"})
+    if not has_audio:
+        issues.append({"severity": "fail", "check": "mp4", "issue": "MP4 has no audio stream — the Khmer narration never made it into the mux"})
 
     # Aspect ratio check (vertical 9:16 check)
     if width > 0 and height > 0:
@@ -259,9 +264,12 @@ def run_full_project_qa(scenes: List[Dict], final_mp4_path: Optional[str] = None
             iss["scene_idx"] = idx
             all_issues.append(iss)
 
-    # 3. Final MP4 validation if path provided
+    # 3. Final MP4 validation if a path is provided. A path that no longer
+    #    resolves is a *failed* check, not a skipped one: the caller (the API,
+    #    a renderer) looked it up in the asset index, so a deleted or truncated
+    #    export has to stop the gate instead of quietly turning it green.
     mp4_res = None
-    if final_mp4_path and os.path.exists(final_mp4_path):
+    if final_mp4_path:
         mp4_res = validate_final_mp4(final_mp4_path)
         all_issues.extend(mp4_res.get("issues", []))
 
