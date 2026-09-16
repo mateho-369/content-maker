@@ -6,6 +6,7 @@ import tempfile
 from typing import Optional
 
 import edge_tts
+from ..util import ffmpeg_exe
 
 
 class EdgeTTSProvider:
@@ -93,7 +94,8 @@ class EdgeTTSProvider:
 
         pcm = (np.clip(sig, -0.95, 0.95) * 24000).astype(np.int16).tobytes()
         try:
-            cmd = ['ffmpeg', '-y', '-f', 's16le', '-ar', str(sr), '-ac', '1', '-i', 'pipe:0', '-f', 'mp3', 'pipe:1']
+            ff = ffmpeg_exe() or "ffmpeg"
+            cmd = [ff, '-y', '-f', 's16le', '-ar', str(sr), '-ac', '1', '-i', 'pipe:0', '-f', 'mp3', 'pipe:1']
             res = subprocess.run(cmd, input=pcm, capture_output=True, check=True)
             return res.stdout
         except Exception:
@@ -114,9 +116,10 @@ class EdgeTTSProvider:
             with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tf:
                 tf.write(data)
                 tmp_mp3 = tf.name
+            ff = ffmpeg_exe() or "ffmpeg"
             try:
                 subprocess.run([
-                    "ffmpeg", "-y", "-i", tmp_mp3,
+                    ff, "-y", "-i", tmp_mp3,
                     "-ar", "44100", "-ac", "1", out_path
                 ], check=True, capture_output=True)
             finally:

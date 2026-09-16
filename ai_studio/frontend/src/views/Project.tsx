@@ -22,6 +22,7 @@ export function ProjectView({ projectId, onOpen }: { projectId: string; onOpen: 
   const [err, setErr] = useState("");
   const [liveMode, setLiveMode] = useState("");
   const [capStyle, setCapStyle] = useState<Record<string, any> | null>(null);
+  const [workflowTab, setWorkflowTab] = useState<"board" | "director" | "qa">("board");
   const toast = useToast();
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -116,7 +117,6 @@ export function ProjectView({ projectId, onOpen }: { projectId: string; onOpen: 
   const deferredCount = runRows.filter((r) => r.status === "deferred").length;
   const stages = specs.length ? specs : STAGE_FALLBACK;
   const sc = proj.scenes || [];
-  const [workflowTab, setWorkflowTab] = useState<"board" | "director" | "qa">("board");
 
   const isAuto = proj.settings?.control_mode !== "manual";
   const toggleControlMode = async () => {

@@ -32,8 +32,10 @@ TEST_PHRASES = [
 def base_video(tmp_path):
     """Generate a short 1.5s 720x1280 MP4 for burning."""
     p = str(tmp_path / "base.mp4")
+    from ai_studio.util import ffmpeg_exe
+    ff = ffmpeg_exe() or "ffmpeg"
     subprocess.run([
-        "ffmpeg", "-y", "-f", "lavfi",
+        ff, "-y", "-f", "lavfi",
         "-i", "color=c=black:s=720x1280:r=25:d=1.5",
         "-c:v", "libx264", "-pix_fmt", "yuv420p", p
     ], check=True, capture_output=True)
@@ -58,8 +60,10 @@ def test_burn_ass_khmer_clusters(base_video, tmp_path, preset):
 
     # Extract frame at 0.5s and verify it exists and is populated
     frame_png = str(tmp_path / f"frame_{preset}.png")
+    from ai_studio.util import ffmpeg_exe
+    ff = ffmpeg_exe() or "ffmpeg"
     subprocess.run([
-        "ffmpeg", "-y", "-ss", "00:00:00.500", "-i", out_mp4,
+        ff, "-y", "-ss", "00:00:00.500", "-i", out_mp4,
         "-frames:v", "1", frame_png
     ], check=True, capture_output=True)
     assert os.path.exists(frame_png)

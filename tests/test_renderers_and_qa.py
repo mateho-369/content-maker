@@ -153,7 +153,9 @@ def test_white_renderer_end_to_end_produces_the_photo_and_passes_qa(renderer, tm
 
     plain = renderer.create_white_background(720, 1280)
     frame_path = tmp_path / "probe.png"
-    subprocess.check_call(["ffmpeg", "-y", "-ss", "7.0", "-i", str(final), "-vframes", "1", str(frame_path)],
+    from ai_studio.util import ffmpeg_exe
+    ff = ffmpeg_exe() or "ffmpeg"
+    subprocess.check_call([ff, "-y", "-ss", "7.0", "-i", str(final), "-vframes", "1", str(frame_path)],
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     frame = cv2.imread(str(frame_path))
     assert frame is not None

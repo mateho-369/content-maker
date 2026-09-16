@@ -120,6 +120,11 @@ if not defined STUDIO_PY (
   )
 ) else (
   echo [OK] Studio venv: %STUDIO_PY%
+  "%STUDIO_PY%" -c "import multipart, fastapi, uvicorn" >nul 2>&1
+  if !ERRORLEVEL! NEQ 0 (
+    echo [SETUP] Incomplete studio dependencies detected - updating .venv-studio...
+    "%STUDIO_PY%" -m pip install -r "%ENGINE_DIR%\requirements-studio.txt"
+  )
 )
 
 :: ----------------------------------------------------------

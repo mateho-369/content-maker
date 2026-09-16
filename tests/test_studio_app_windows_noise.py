@@ -99,9 +99,11 @@ def gallery_app(tmp_path, monkeypatch):
 
 def _make_clip(path, seconds=1.0):
     """A real (tiny) H.264 clip so media_duration() has something to probe."""
+    from ai_studio.util import ffmpeg_exe
+    ff = ffmpeg_exe() or "ffmpeg"
     os.makedirs(os.path.dirname(path), exist_ok=True)
     subprocess.check_call(
-        ["ffmpeg", "-y", "-f", "lavfi", "-i", f"testsrc=duration={seconds}:size=64x64:rate=10",
+        [ff, "-y", "-f", "lavfi", "-i", f"testsrc=duration={seconds}:size=64x64:rate=10",
          "-pix_fmt", "yuv420p", path],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
