@@ -26,6 +26,27 @@ export function ProjectView({ projectId, onOpen }: { projectId: string; onOpen: 
   const [err, setErr] = useState("");
   const [liveMode, setLiveMode] = useState("");
   const [capStyle, setCapStyle] = useState<Record<string, any> | null>(null);
+  
+  // Manual mode state - MUST be declared before any early returns
+  const [workflowTab, setWorkflowTab] = useState<"board" | "director" | "qa">("board");
+  const [selectedScenes, setSelectedScenes] = useState<number[]>([]);
+  const [enabledStages, setEnabledStages] = useState<string[]>(["breakdown", "voice_base", "sfx", "subtitles", "qa", "assemble"]);
+  const [defaultAction, setDefaultAction] = useState("talking");
+  const [defaultEmotion, setDefaultEmotion] = useState("calm");
+  const [defaultVisual, setDefaultVisual] = useState("illustration");
+  const [globalBackground, setGlobalBackground] = useState<BackgroundChoice>({ type: "white_studio" });
+  const [outputFormat, setOutputFormat] = useState("mp4");
+  const [resolution, setResolution] = useState("720x1280");
+  const [fps, setFps] = useState(30);
+  const [parallelWorkers, setParallelWorkers] = useState(2);
+  const [skipQA, setSkipQA] = useState(false);
+  const [previewOnly, setPreviewOnly] = useState(false);
+  const [showPreRunSummary, setShowPreRunSummary] = useState(false);
+  const [isRunning, setIsRunning] = useState(false);
+  const [voices, setVoices] = useState<VoiceProfile[]>([]);
+  const [selectedVoice, setSelectedVoice] = useState("");
+  const [manualScript, setManualScript] = useState("");
+  
   const toast = useToast();
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -39,11 +60,26 @@ export function ProjectView({ projectId, onOpen }: { projectId: string; onOpen: 
       setSpecs(s.roles || []);
       const a = await api<{ assets: Asset[] }>("/assets", { query: { project_id: projectId, limit: 300 } });
       setAssets(a.assets || []);
+      // Sync manualScript with project script
+      setManualScript(d.project.script || "");
       setErr("");
     } catch (e) { setErr(errText(e)); }
   }, [projectId]);
 
   useEffect(() => { load(); }, [load]);
+  
+  // Load voices
+  useEffect(() => {
+    api<{ voices: VoiceProfile[] }>("/voices")
+      .then((r) => {
+        setVoices(r.voices || []);
+        if (!selectedVoice && r.voices?.length) {
+          const edgeTts = r.voices.find(v => v.engine === "edge_tts");
+          if (edgeTts) setSelectedVoice(edgeTts.id);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   // live WS with SSE + polling fallback
   const connect = useCallback((runId: string) => {
@@ -120,38 +156,9 @@ export function ProjectView({ projectId, onOpen }: { projectId: string; onOpen: 
   const deferredCount = runRows.filter((r) => r.status === "deferred").length;
   const stages = specs.length ? specs : STAGE_FALLBACK;
   const sc = proj.scenes || [];
-  const [workflowTab, setWorkflowTab] = useState<"board" | "director" | "qa">("board");
   
   // Manual mode state
   const isAuto = proj.settings?.control_mode !== "manual";
-  const [selectedScenes, setSelectedScenes] = useState<number[]>([]);
-  const [enabledStages, setEnabledStages] = useState<string[]>(["breakdown", "voice_base", "sfx", "subtitles", "qa", "assemble"]);
-  const [defaultAction, setDefaultAction] = useState("talking");
-  const [defaultEmotion, setDefaultEmotion] = useState("calm");
-  const [defaultVisual, setDefaultVisual] = useState("illustration");
-  const [globalBackground, setGlobalBackground] = useState<BackgroundChoice>({ type: "white_studio" });
-  const [outputFormat, setOutputFormat] = useState("mp4");
-  const [resolution, setResolution] = useState("720x1280");
-  const [fps, setFps] = useState(30);
-  const [parallelWorkers, setParallelWorkers] = useState(2);
-  const [skipQA, setSkipQA] = useState(false);
-  const [previewOnly, setPreviewOnly] = useState(false);
-  const [showPreRunSummary, setShowPreRunSummary] = useState(false);
-  const [isRunning, setIsRunning] = useState(false);
-  const [voices, setVoices] = useState<VoiceProfile[]>([]);
-  const [selectedVoice, setSelectedVoice] = useState("");
-  
-  useEffect(() => {
-    api<{ voices: VoiceProfile[] }>("/voices")
-      .then((r) => {
-        setVoices(r.voices || []);
-        if (!selectedVoice && r.voices?.length) {
-          const edgeTts = r.voices.find(v => v.engine === "edge_tts");
-          if (edgeTts) setSelectedVoice(edgeTts.id);
-        }
-      })
-      .catch(() => {});
-  }, []);
   
   const toggleControlMode = async () => {
     const nextMode = isAuto ? "manual" : "auto";
@@ -232,8 +239,8 @@ export function ProjectView({ projectId, onOpen }: { projectId: string; onOpen: 
       {/* Manual Control Panel - only visible in manual mode */}
       {!isAuto && workflowTab === "board" && (
         <ManualControlPanel
-          script={proj.script || ""}
-          onScriptChange={(script) => {}}
+          script={manualScript}
+          onScriptChange={setManualScript}
           scenes={sc}
           selectedScenes={selectedScenes}
           onSelectedScenesChange={setSelectedScenes}
