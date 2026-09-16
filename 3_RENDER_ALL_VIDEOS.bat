@@ -19,6 +19,7 @@ set "SCRIPT_DIR=%~dp0"
 if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 cd /d "%SCRIPT_DIR%"
 
+set "STUDIO_DATA_DIR=%SCRIPT_DIR%\data\studio"
 set "VENV_DIR=%SCRIPT_DIR%\.venv-studio"
 set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
 

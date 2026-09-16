@@ -21,6 +21,7 @@ imageio-ffmpeg==0.6.0              # bundled ffmpeg binary when none is on PATH
 uharfbuzz==0.56.1                  # Khmer shaping: real glyph clusters + shaped pixel widths
 khmercut==0.2.0                    # offline Khmer word segmentation for line wrapping
 sherpa-onnx>=1.10.0                # Stage 3a: offline Khmer TTS runtime (run scripts/setup_khmer_tts.sh)
+edge-tts>=6.1.0                    # Microsoft Neural TTS for Khmer (km-KH-PisethNeural)
 ffmpeg-python==0.2.0               # FFmpeg Python bindings
 pysubs2==1.8.1                     # Advanced SubStation Alpha (ASS) subtitle tools
 

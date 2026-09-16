@@ -279,6 +279,26 @@ class HuggingFaceTTSProvider(BaseTTSProvider):
             return {"ok": False, "reason": f"Hugging Face API error: {str(e)[:180]}", "provider": self.id}
 
 
+# ------------------------------------------------------------- Edge-TTS Provider
+class EdgeTTSStudioProvider(BaseTTSProvider):
+    id = "edge_tts"
+    name = "Microsoft Neural TTS (Edge-TTS km-KH-PisethNeural)"
+    is_local = False
+    requires_api_key = False
+
+    def is_available(self, cfg: dict) -> bool:
+        try:
+            from .engines.edge_tts_provider import EdgeTTSProvider
+            return True
+        except Exception:
+            return False
+
+    def synthesize_raw(self, text: str, out_wav: str, cfg: dict, progress=None) -> dict:
+        from .engines.edge_tts_provider import EdgeTTSProvider
+        p = EdgeTTSProvider()
+        return p.synthesize_to_file(text, out_wav, gender="male", emotion="neutral")
+
+
 # ------------------------------------------------------------- Placeholder Provider
 class PlaceholderTTSProvider(BaseTTSProvider):
     id = "placeholder"
@@ -297,6 +317,7 @@ class PlaceholderTTSProvider(BaseTTSProvider):
 
 # ------------------------------------------------------------- TTS Registry & Manager
 PROVIDERS: dict[str, BaseTTSProvider] = {
+    "edge_tts": EdgeTTSStudioProvider(),
     "local_sherpa": LocalSherpaTTSProvider(),
     "huggingface": HuggingFaceTTSProvider(),
     "placeholder": PlaceholderTTSProvider(),
@@ -331,8 +352,10 @@ def synthesize_speech(text: str, out_wav: str, cfg: dict,
     # Resolve provider
     chosen = provider_id
     if chosen == "auto" or chosen not in PROVIDERS:
-        # Check local sherpa first, then HF if token present, then placeholder
-        if PROVIDERS["local_sherpa"].is_available(cfg):
+        # Check Edge-TTS FIRST (most reliable on Windows & across environments)
+        if PROVIDERS["edge_tts"].is_available(cfg):
+            chosen = "edge_tts"
+        elif PROVIDERS["local_sherpa"].is_available(cfg):
             chosen = "local_sherpa"
         elif PROVIDERS["huggingface"].is_available(cfg):
             chosen = "huggingface"
