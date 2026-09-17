@@ -545,6 +545,40 @@ const calls = (re, since = 0) => net.slice(since).filter((n) => re.test(n.p));
 
   // the log must stay windowed no matter how much a run writes
   const logPanel = panel("Event log");
+  // the AUTO badge must tell the truth about what the panel left switched off, and
+  // you must be able to dismiss it — a warning with no action is decoration
+  {
+    await realFetch(`${BASE}/api/projects/${pid}`, {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ settings: { control_mode: "auto" } }),
+    });
+    window.location.hash = "#/projects"; await tick(140);
+    window.location.hash = "#/project/" + pid;
+    await wait("board back", () => panel("Scene board"));
+    const clr = await wait("auto mode flags the panel's leftover switches",
+      () => window.document.querySelector('[data-testid="clear-panel-skips"]')).catch(() => null);
+    ok("48a AUTO mode names the panel switches it is ignoring",
+      !!clr && /sfx/.test(txt(clr)), clr ? txt(clr) : "no badge");
+    if (clr) {
+      click(clr);
+      await tick(1200);
+      const p3 = (await (await realFetch(`${BASE}/api/projects/${pid}`)).json()).project;
+      ok("48b that badge clears the leftover switches for real",
+        (p3.settings.skip_stages || []).length === 0
+        && (p3.settings.run_skip_scenes || []).length === 0
+        && !window.document.querySelector('[data-testid="clear-panel-skips"]'),
+        `skip_stages=${JSON.stringify(p3.settings.skip_stages)} · badge still up=${
+          !!window.document.querySelector('[data-testid="clear-panel-skips"]')}`);
+    } else {
+      ok("48b that badge clears the leftover switches for real", false, "there was no badge to click");
+    }
+    await realFetch(`${BASE}/api/projects/${pid}`, {
+      method: "PATCH", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ settings: { control_mode: "manual" } }),
+    });
+    await tick(300);
+  }
+
   ok("49 the event log is windowed, not the whole run", !!logPanel
     && $$("[data-testid='event-log'] > div", window.document).length <= 130,
     `${$$("[data-testid='event-log'] > div", window.document).length} lines mounted`);

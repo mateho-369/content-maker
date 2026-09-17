@@ -21,6 +21,8 @@ export interface Bg {
 
 interface BgField {
   name: string; label: string; kind: string; default?: any; accept?: string;
+  /** for kind="choice": exactly what the server's catalog offers, never a hardcoded list */
+  options?: { key: string; label: string; emoji?: string; one_liner?: string }[];
 }
 
 interface BgType {
@@ -197,7 +199,10 @@ export function BackgroundPicker({ value, onChange, projectId = "", dense = fals
               // `template` is the one choice field, and it is already rendered as a
               // grid of the six built-in plates right above — no duplicate control
               if (f.name === "template") return null;
-              const opts = [];
+              // options come from the catalog: a choice field with no options would be
+              // an empty <select>, i.e. a control that can only ever be decoration
+              const opts = Array.isArray(f.options) ? f.options : [];
+              if (!opts.length) return null;
               return (
                 <label key={f.name} className="bgfield">
                   <span>{f.label}</span>
