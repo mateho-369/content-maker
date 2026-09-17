@@ -274,3 +274,60 @@ def test_caption_contrast_check_is_measured_not_assumed(studio, tmp_path):
     junk.write_bytes(b"not a video at all")
     res = check_caption_contrast(str(junk))
     assert not res["checked"] and res["issues"][0]["severity"] == "warn", res
+
+
+def test_the_seed_the_picker_sets_actually_rerolls_the_plate():
+    """A stored seed must reach the generator *and* the cache key.
+
+    The plate is cached one file per key, so a seed that is not part of the key
+    means "re-roll with seed 7" quietly returns the file seed 1 produced.
+    """
+    k0 = bg.key_of({"type": "ai_prompt", "prompt": "warm wood desk", "seed": 0})
+    k7 = bg.key_of({"type": "ai_prompt", "prompt": "warm wood desk", "seed": 7})
+    assert k7.startswith(k0) and k7 != k0, (k0, k7)
+    assert "-s" not in k0, k0            # seed 0 keeps the pre-existing name on disk
+    r7 = bg.resolve({"type": "ai_prompt", "prompt": "warm wood desk", "seed": 7},
+                    width=64, height=64, project_dir="/tmp/proj")
+    assert r7["seed"] == 7, r7           # resolve() used to take only the caller's seed
+    assert r7["target"].endswith(f"{r7['key'].split(':')[-1]}.png"), r7
+    # the picker can only set what the catalog declares
+    assert "seed" in [f["name"] for t in bg.catalog()["types"]
+                      if t["key"] == "ai_prompt" for f in t["fields"]]
+
+
+def test_background_for_reads_the_stored_seed(tmp_path):
+    """The pipeline's own resolver must not drop it on the floor."""
+    from ai_studio.app import StudioState
+    from ai_studio.pipeline.context import RunContext
+
+    st = StudioState(str(tmp_path))
+    pid = st.db.create_project(title="seed", mode="A", status="ready", script=LINE,
+                              settings={"background": {"type": "ai_prompt", "prompt": "desk",
+                                                       "seed": 42}})["id"]
+    ctx = RunContext(st.db, st.config(), {}, st.db.get_project(pid),
+                     {"id": "r1", "project_id": pid}, bus=None, data_root=str(tmp_path))
+    res, notes = ctx.background_for({"idx": 0, "meta": {}})
+    assert res and res["seed"] == 42, (res, notes)
+    assert res["key"].endswith("-s42"), res["key"]
+
+
+def test_the_qa_gate_measures_caption_readability_on_the_real_file(tmp_path):
+    """`run_full_project_qa` must not wave through a cut whose captions are invisible."""
+    from ai_studio import qa as qa_mod
+
+    white = str(tmp_path / "white.mp4")
+    subprocess.run([ffmpeg(), "-y", "-loglevel", "error", "-f", "lavfi",
+                    "-i", "color=white:s=180x320:d=2", "-f", "lavfi",
+                    "-i", "sine=frequency=200:duration=2", "-pix_fmt", "yuv420p",
+                    "-shortest", "-c:a", "aac", white], check=True)
+    scenes = [{"idx": 0, "text": LINE, "estimated_duration_sec": 2.0, "audio_duration": 2.0}]
+    res = qa_mod.run_full_project_qa(scenes, white, content_type="explainer")
+    assert res["caption_contrast"]["checked"] is True, res["caption_contrast"]
+    assert res["caption_contrast"]["max_band_mean"] > 200, res["caption_contrast"]
+    assert any(i["check"] == "caption_contrast" for i in res["warnings"]), res["warnings"]
+    # a warning, not a failure: the render is sound, the *choice* is questionable
+    assert not any(i["check"] == "caption_contrast" for i in res["failures"]), res["failures"]
+    # with captions switched off the band is just the picture — nothing to judge
+    off = qa_mod.run_full_project_qa(scenes, white, content_type="explainer", captions_burned=False)
+    assert off["caption_contrast"]["checked"] is False, off["caption_contrast"]
+    assert not any(i["check"] == "caption_contrast" for i in off["warnings"] + off["failures"])

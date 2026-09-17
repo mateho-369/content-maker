@@ -1925,8 +1925,10 @@ def _project_qa_payload(st, project_id: str) -> dict:
                 "failures": [], "warnings": [], "total_scenes": 0,
                 "estimated_duration": 0.0, "final_mp4": final_mp4,
                 "mp4_checked": False, "mp4_verified": False}
+    _set = proj.get("settings") or {}
     res = qa_engine.run_full_project_qa(scenes, final_mp4, content_type=ct,
-                                        target_dimensions=final_dimensions(proj.get("settings")))
+                                        target_dimensions=final_dimensions(_set),
+                                        captions_burned=bool(_set.get("burn_captions", True)))
     if not final_mp4:
         res["message"] = ("the script and scenes were audited; the export was not — this project "
                           "has no rendered video yet. Run Studio (or resume from Assemble) to "

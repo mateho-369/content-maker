@@ -395,6 +395,9 @@ const calls = (re, since = 0) => net.slice(since).filter((n) => re.test(n.p));
   const gateFails = (gateJson.failures || []).map((f) => `${f.check}: ${f.issue}`).join(" | ").slice(0, 150);
   const verdict = /APPROVED FOR EXPORT/.test(gate) ? "approved"
     : /ISSUES DETECTED/.test(gate) ? "flagged" : "?";
+  ok("31b the gate measured the caption band of the actual export",
+    !!gateJson.caption_contrast && typeof gateJson.caption_contrast.checked === "boolean",
+    JSON.stringify(gateJson.caption_contrast));
   ok("31 the gate reports the render state, not a crash",
     /Gate Status/.test(gate) && ["approved", "flagged"].includes(verdict),
     `verdict=${verdict} · checked=${gateJson.checked} · ${gateFails || "no failures"}`);
@@ -484,6 +487,29 @@ const calls = (re, since = 0) => net.slice(since).filter((n) => re.test(n.p));
   click(rows(panel("Scene board"))[2].querySelector('[data-testid^="scene-in-run-"]'));
   await tick(1200);
 
+  // the big header button must start the SAME run as the panel — a tickbox that only
+  // the small button honours is a control that sometimes lies
+  {
+    const before = (await (await realFetch(`${BASE}/api/projects/${pid}`)).json()).project.last_run_id;
+    click(window.document.querySelector('[data-testid="run-studio"]'));
+    // (no wait(): a predicate that returns a Promise is always truthy — poll instead)
+    let newRun = "";
+    for (let i = 0; i < 60 && !newRun; i++) {
+      await tick(250);
+      const p2 = (await (await realFetch(`${BASE}/api/projects/${pid}`)).json()).project;
+      if (p2.last_run_id && p2.last_run_id !== before) newRun = p2.last_run_id;
+    }
+    const hdr = newRun ? (await (await realFetch(`${BASE}/api/runs/${newRun}/status?since=0`)).json()) : null;
+    const hrow = Object.fromEntries((hdr?.stages || []).map((r) => [r.stage, r]));
+    ok("45a the header Run button carries the panel's switches",
+      !!hdr && hrow.sfx?.status === "skipped" && /disabled/i.test(hrow.sfx?.message || ""),
+      newRun ? `sfx=${hrow.sfx?.status} "${(hrow.sfx?.message || "").slice(0, 40)}"` : "no run started");
+    // stop it, and let the page's poll loop notice — otherwise its last in-flight
+    // status request is mistaken for the 404-flood the next step measures
+    if (newRun) await realFetch(`${BASE}/api/runs/${newRun}/cancel`, { method: "POST" });
+    await tick(2600);
+  }
+
   // backgrounds: catalogue tiles, project save, per-scene override
   const bgp = panel("Background & Style");
   const tiles = $$(".bgtile", bgp);
@@ -532,9 +558,16 @@ const calls = (re, since = 0) => net.slice(since).filter((n) => re.test(n.p));
   click(findBtn(window.document.querySelector(".main"), "Run Studio"));
   await tick(7000);
   const floods = calls(/\/api\/runs\/[^/]+\/status/, floodMark);
+  // the property is *stopping*, not a magic count: at a 2s cadence a 7s window
+  // legitimately holds 3-5 attempts (the mount snapshot + the first ticks), so the
+  // second window must be empty — that is what "404-per-2s forever" would break.
+  const afterMark = net.length;
+  await tick(6000);
+  const afterPolls = calls(/\/api\/runs\/[^/]+\/status/, afterMark);
   forceRunGone = false;
-  ok("34 a vanished run stops polling instead of 404-per-2s forever", floods.length <= 3,
-    `${floods.length} status requests in 7s after the run 404'd (was unbounded)`);
+  ok("34 a vanished run stops polling instead of 404-per-2s forever",
+    floods.length <= 5 && afterPolls.length === 0,
+    `${floods.length} status requests in the first 7s, ${afterPolls.length} in the 6s after it gave up (was unbounded)`);
 
   // 12 ─ sweep every nav tab for hard errors ----------------------------------
   const tabs = $$(".side .nav").map((b) => txt(b));

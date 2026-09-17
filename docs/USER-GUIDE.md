@@ -115,6 +115,11 @@ two selectors the AUTO Director was deciding for you:
   its basis (`measured on this machine` when there is history, otherwise the
   board's own durations). It refuses nothing — it just means the number you
   see is the number you get.
+- The big **▶ Run Studio** button in the header starts the *same* run the panel
+  describes — the ticked-off stages and scenes travel with it, so there is no
+  second button that quietly ignores your choices. In AUTO mode those stored
+  switches are not applied, and the header says so with a
+  `⚠ panel had sfx/qa off — clear` button rather than hiding them.
 - While a run is live the same panel becomes the progress line: `n/N stages ·
   k jobs left · ≈ 3m 40s remaining (measured)`, with **pause**, **resume**,
   **stop**, and **skip scene N and continue** — which drops the scene the run
@@ -130,7 +135,7 @@ code path the video renderer uses), not colour swatches:
 | ⬜ White Studio / ⬛ Black Studio | the two built-in cycloramas, key light and all |
 | 🎨 Gradient | your two colours, diagonal |
 | 🖼️ Custom Image | an upload, stored under the data dir and cover-cropped per frame |
-| 🤖 AI Generate | one plate per prompt, made by the image engine, cached, reused |
+| 🤖 AI Generate | one plate per prompt **and seed**, made by the image engine, cached, reused — change the seed and you get a new plate, not the cached one |
 | 🎭 Template | the six procedural environments (studio, nature, city, abstract, paper, neon) |
 
 A near-white plate with white subtitles is how captions "disappear", so the

@@ -130,8 +130,7 @@ class RunContext:
             return None, [f"background ignored: {val}"]
         v = self.cfg.get("video", {}) or {}
         res = bg_mod.resolve(val, width=int(v.get("width", 480)), height=int(v.get("height", 854)),
-                            data_root=self.data_root, seed=0,
-                            project_dir=self.project_dir())
+                            data_root=self.data_root, project_dir=self.project_dir())
         if not res:
             return None, []
         if res["kind"] == "ai":

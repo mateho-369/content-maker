@@ -70,7 +70,8 @@ BACKGROUNDS = {
               "default": {"type": "image", "path": ""}},
     "ai_prompt": {"key": "ai_prompt", "label": "AI Generate", "emoji": "🤖",
                   "one_liner": "One plate per prompt, made by the image engine and reused",
-                  "fields": [{"name": "prompt", "label": "Prompt", "kind": "text", "default": ""}],
+                  "fields": [{"name": "prompt", "label": "Prompt", "kind": "text", "default": ""},
+                             {"name": "seed", "label": "Seed", "kind": "number", "default": 0}],
                   "default": {"type": "ai_prompt", "prompt": ""}},
     "template": {"key": "template", "label": "Templates", "emoji": "📦",
                  "one_liner": "Six looks rendered locally — no model needed",
@@ -200,7 +201,12 @@ def key_of(b):
     if b["type"] == "gradient":
         return f"gradient:{b.get('a', '')}-{b.get('b', '')}"
     if b["type"] == "ai_prompt":
-        return "ai_prompt:" + hashlib.sha1(str(b.get("prompt") or "").encode()).hexdigest()[:10]
+        stem = "ai_prompt:" + hashlib.sha1(str(b.get("prompt") or "").encode()).hexdigest()[:10]
+        # a different seed is a different plate, so it must be a different cache key —
+        # otherwise "re-roll with seed 7" quietly returns the file seed 1 produced.
+        # Seed 0 keeps the old key so existing plates still resolve.
+        sd = int(b.get("seed") or 0)
+        return f"{stem}-s{sd}" if sd else stem
     if b["type"] == "image":
         return "image:" + os.path.basename(str(b.get("path") or ""))
     return b["type"]
@@ -263,8 +269,11 @@ def resolve(raw, *, width=720, height=1280, data_root="", seed=0, project_dir=""
     if not b:
         return None
     t, w, h = b["type"], max(2, int(width)), max(2, int(height))
+    # an explicit call-site seed wins, then the one the Director stored on the
+    # background (the picker's 🎲 field) — `background_for` used to pass seed=0,
+    # which silently discarded whatever seed the project had chosen
     out = {"type": t, "key": key_of(b), "label": label(b), "w": w, "h": h,
-           "seed": int(seed or 0)}
+           "seed": int(seed or 0) or int(b.get("seed") or 0)}
     if t == "white_studio":
         out.update({"kind": "studio", "variant": "white", "top": _STUDIO["white"][0],
                     "bottom": _STUDIO["white"][1]})

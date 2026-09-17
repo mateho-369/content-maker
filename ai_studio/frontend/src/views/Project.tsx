@@ -148,6 +148,27 @@ export function ProjectView({ projectId, onOpen }: { projectId: string; onOpen: 
   const sc = proj.scenes || [];
 
   const isAuto = proj.settings?.control_mode !== "manual";
+  // The header button and the Manual Control Panel must start the *same* run: a
+  // tickbox that only works when you press the small button is the exact bug class
+  // this panel exists to remove. The panel persists its two selectors onto the
+  // project settings, so both entry points read one source of truth.
+  const settingSkip = Array.isArray(proj.settings?.skip_stages) ? proj.settings.skip_stages : [];
+  const runOff = Array.isArray(proj.settings?.run_skip_scenes) ? proj.settings.run_skip_scenes : [];
+  const boardOff = sc.filter((x) => (x.meta || {}).disabled).map((x) => x.idx);
+  const manualPayload = () => ({
+    skip_stages: settingSkip,
+    skip_scenes: Array.from(new Set([...boardOff, ...runOff])).sort((a, b) => a - b),
+  });
+  const clearPanelSkips = async () => {
+    try {
+      await api(`/projects/${proj.id}`, {
+        method: "PATCH",
+        json: { settings: { ...proj.settings, skip_stages: [], run_skip_scenes: [] } },
+      });
+      toast("the panel's switches are back to running everything", "ok");
+      load();
+    } catch (e) { toast(errText(e), "err"); }
+  };
   const toggleControlMode = async () => {
     const nextMode = isAuto ? "manual" : "auto";
     try {
@@ -179,7 +200,18 @@ export function ProjectView({ projectId, onOpen }: { projectId: string; onOpen: 
           <StatusBadge status={live?.status || proj.status} />
         </div>
         <div className="row" style={{ gap: 6 }}>
-          <button className="btn primary" disabled={!!busy} onClick={() => startRun({})}>{busy === "starting" ? <Spinner /> : "▶ Run Studio"}</button>
+          <button className="btn primary" disabled={!!busy} data-testid="run-studio"
+            onClick={() => startRun(isAuto ? {} : manualPayload())}>
+            {busy === "starting" ? <Spinner /> : "▶ Run Studio"}
+          </button>
+          {isAuto && (settingSkip.length || runOff.length) ? (
+            <button className="btn tiny warn" data-testid="clear-panel-skips"
+              title="the Manual Control Panel left these switched off; AUTO mode runs everything and ignores them"
+              onClick={clearPanelSkips}>
+              ⚠ panel had {settingSkip.length ? `${settingSkip.join("/")} off` : "stages on"}
+              {runOff.length ? ` · ${runOff.length} scene(s) off` : ""} — clear
+            </button>
+          ) : null}
           <button className="btn" disabled={!live?.run_id || !!busy}
             onClick={() => act("pause", `/runs/${live!.run_id}/pause`)}>⏸</button>
           <button className="btn" disabled={!live?.run_id || !!busy}

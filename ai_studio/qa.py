@@ -349,7 +349,8 @@ def validate_example_assets(scenes: List[Dict], repo_root: Optional[str] = None)
 
 def run_full_project_qa(scenes: List[Dict], final_mp4_path: Optional[str] = None,
                         content_type: str = "explainer",
-                        target_dimensions: Optional[Tuple[int, int]] = None) -> Dict:
+                        target_dimensions: Optional[Tuple[int, int]] = None,
+                        captions_burned: bool = True) -> Dict:
     """Consolidated QA Gate assessment across all dimensions."""
     all_issues = []
 
@@ -399,6 +400,15 @@ def run_full_project_qa(scenes: List[Dict], final_mp4_path: Optional[str] = None
                                         "from the export (a dropped scene, or a voice/video "
                                         "stage that never ran)"})
 
+    # 5. Can the burnt-in captions actually be read on the chosen background? Every
+    #    other check in this gate would call a white-on-white cut a success: the
+    #    container is fine, the duration is fine, the audio is there. So the finished
+    #    file is sampled at the band captions live in — measured, never assumed.
+    cap_res = {}
+    if final_mp4_path and captions_burned:
+        cap_res = check_caption_contrast(final_mp4_path)
+        all_issues.extend(cap_res.get("issues", []))
+
     fails = [i for i in all_issues if i.get("severity") == "fail"]
     warns = [i for i in all_issues if i.get("severity") == "warn"]
 
@@ -420,4 +430,11 @@ def run_full_project_qa(scenes: List[Dict], final_mp4_path: Optional[str] = None
         "mp4_verified": bool(mp4_res.get("passed")),
         "final_mp4": final_mp4_path or "",
         "final_size_bytes": mp4_res.get("size_bytes", 0),
+        # the caption-band measurement, kept as its own dimension so the panel can
+        # show the number (0-255) instead of only a verdict
+        "caption_contrast": {k: cap_res.get(k) for k in
+                             ("checked", "passed", "max_band_mean")} if cap_res
+                            else {"checked": False, "passed": True, "max_band_mean": 0.0,
+                                  "skipped": "no captions burned into the export"
+                                  if not captions_burned else "no final MP4 to sample"},
     }

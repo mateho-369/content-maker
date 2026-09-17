@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Click-level test of the manual workflow: real React app (jsdom) + real studio API.
 #
-#   ./tests/ui_clickflow/run.sh            # full flow, 54 checks
+#   ./tests/ui_clickflow/run.sh            # full flow, 59 checks
 #   PORT=8123 ./tests/ui_clickflow/run.sh  # if 8011 is taken
 #
 # Needs: node, npm (for jsdom + esbuild via the frontend's node_modules), and a
