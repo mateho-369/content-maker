@@ -135,6 +135,16 @@ def test_render_and_qa_format(tmp_path, item):
     res_burn = media.burn_subtitles(raw_video, srt_path, final_mp4)
     assert os.path.exists(final_mp4)
 
+    # The QA gate refuses a final cut with no audio track — that is the dud it
+    # exists to catch (an audio stage deferred, a mux that dropped the track). So
+    # this fixture has to finish what the renderer does in production: put the
+    # narration it synthesised *into* the file.
+    voiced = str(tmp_path / f"{fmt}_voiced.mp4")
+    subprocess.check_call(["ffmpeg", "-y", "-loglevel", "error", "-i", final_mp4,
+                           "-i", audio_path, "-map", "0:v", "-map", "1:a",
+                           "-c:v", "copy", "-c:a", "aac", "-shortest", voiced])
+    os.replace(voiced, final_mp4)
+
     # 5. Extract inspection frames
     frame1 = str(tmp_path / f"{fmt}_frame1.png")
     frame2 = str(tmp_path / f"{fmt}_frame2.png")

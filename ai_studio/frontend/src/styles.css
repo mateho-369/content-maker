@@ -323,3 +323,40 @@ textarea.scene-text { min-height: 54px; }
 @media (max-width: 620px) { .cap-two { grid-template-columns: 1fr; } }
 input[type="range"] { padding: 0; height: 22px; background: transparent; border: 0; accent-color: var(--acc); }
 input[type="color"] { padding: 2px; height: 32px; }
+
+/* ── Manual Control Panel + backgrounds ───────────────────────────────────── */
+.mcp-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+@media (max-width: 1100px) { .mcp-cols { grid-template-columns: 1fr; } }
+.mcp-h { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--mut, #8b94a6); margin-bottom: 6px; }
+.mcp-grid { display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.mcp-item { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; padding: 2px 6px; border-radius: 6px; cursor: pointer; }
+.mcp-item:hover { background: rgba(255,255,255,.04); }
+.mcp-item.off { opacity: .55; }
+.mcp-item.off span { text-decoration: line-through; }
+.mcp-item.core { opacity: .8; cursor: not-allowed; }
+.mcp-lock { font-style: normal; font-size: 9px; text-transform: uppercase; color: var(--mut, #8b94a6); border: 1px solid rgba(255,255,255,.12); padding: 0 3px; border-radius: 4px; }
+.mcp-live { margin-top: 10px; padding-top: 9px; border-top: 1px solid rgba(255,255,255,.08); }
+.mcp-warn { margin-top: 8px; font-size: 11.5px; line-height: 1.5; color: var(--warn, #f0b754); background: rgba(240,183,84,.08); border-left: 2px solid var(--warn, #f0b754); padding: 6px 8px; border-radius: 0 6px 6px 0; }
+.prerun-row { display: flex; gap: 8px; align-items: baseline; font-size: 12.5px; padding: 3px 0; border-bottom: 1px dashed rgba(255,255,255,.07); }
+.prerun-row > span:first-child { flex: 0 0 108px; color: var(--mut, #8b94a6); text-transform: uppercase; font-size: 10px; letter-spacing: .05em; }
+.bgpick-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 6px; }
+.bgpick-grid.dense { grid-template-columns: repeat(auto-fill, minmax(74px, 1fr)); }
+.bgtile { position: relative; display: block; border: 1px solid #333c4b; border-radius: 8px; overflow: hidden; background: #171c24; padding: 0; cursor: pointer; text-align: left; aspect-ratio: 9 / 13; }
+.bgtile:hover { border-color: #55617a; }
+.bgtile.on { border-color: var(--acc, #4c8dff); box-shadow: 0 0 0 1px var(--acc, #4c8dff) inset; }
+.bgtile-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.bgtile-cap { position: absolute; left: 0; right: 0; bottom: 0; font-size: 10px; padding: 3px 5px; background: linear-gradient(to top, rgba(8,10,14,.92), rgba(8,10,14,.2)); color: #e8ecf3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bgtile-del { position: absolute; top: 2px; right: 3px; font-size: 10px; padding: 1px 3px; border-radius: 4px; background: rgba(8,10,14,.7); }
+.bgfield { display: inline-flex; flex-direction: column; gap: 2px; font-size: 10px; color: var(--mut, #8b94a6); text-transform: uppercase; letter-spacing: .05em; }
+.bgfield input[type=color] { width: 42px; height: 22px; padding: 0; border: 1px solid #333c4b; border-radius: 4px; background: transparent; }
+.bgfield input[type=number] { width: 66px; font-size: 11px; padding: 2px 4px; }
+.bgpick-fields { align-items: flex-end; }
+.bgchip { display: inline-flex; align-items: center; justify-content: center; border-radius: 5px; overflow: hidden; border: 1px solid #333c4b; background: #171c24; color: var(--mut, #8b94a6); font-size: 11px; flex: 0 0 auto; }
+.bgchip img { width: 100%; height: 100%; object-fit: cover; }
+.bgbtn { display: inline-flex; align-items: center; gap: 4px; width: 100%; justify-content: flex-start; padding: 2px 4px !important; }
+.bgbtn-cap { font-size: 10px; opacity: .8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+tr.bg-expand > td { background: rgba(76,141,255,.05); border-top: 0; }
+
+.bgtile-flag { position: absolute; top: 3px; left: 3px; font-size: 9px; padding: 1px 4px; border-radius: 4px; background: rgba(240,183,84,.9); color: #241a06; font-weight: 600; z-index: 2; }
+.bgtile.needs .bgtile-img { opacity: .45; }
+.bgneeds { color: var(--warn, #f0b754); }

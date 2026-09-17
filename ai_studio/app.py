@@ -166,6 +166,28 @@ class StudioState:
         for sub in ("projects", "voices", "tmp", "models/tts", "models/rvc", "workflows"):
             os.makedirs(os.path.join(self.data_root, sub), exist_ok=True)
 
+    # ---------------------------------------------------------------- renders
+    def final_video(self, project_id):
+        """The finished MP4 for a project, or "" if it never rendered.
+
+        Reads the asset row the assemble stage registers (`kind="final"`,
+        scene_idx -1 — the burned-caption cut when captions were built, else the
+        clean one), falling back to the last run's `stats.final_path` for runs
+        whose asset row didn't land.
+
+        A recorded path is returned even if the file has since been deleted:
+        callers (the QA gate especially) must see that as a *broken render* and
+        fail, not as "nothing to check" and pass.
+        """
+        a = self.db.latest_asset(project_id, "final", scene_idx=-1)
+        if a and a.get("path"):
+            return a["path"]
+        for r in self.db.list_runs(project_id, limit=1):
+            p = (r.get("stats") or {}).get("final_path") or ""
+            if p:
+                return p
+        return ""
+
 
 def create_app(data_root=None, enable_demo_seed=False):
     st = StudioState(data_root)

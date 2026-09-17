@@ -542,8 +542,14 @@ def render_character_action_clip(character_img_path: str, action: str,
                                  out_mp4: str, duration: float,
                                  width: int = 720, height: int = 1280,
                                  fps: int = 25, prop: str | None = None,
-                                 audio_path: str | None = None) -> str:
-    """Render a complete MP4 video of the character performing their action."""
+                                 audio_path: str | None = None,
+                                 background: dict | None = None) -> str:
+    """Render a complete MP4 video of the character performing their action.
+
+    ``background``: a resolved ai_studio.backgrounds plate. Without it the clip
+    keeps the built-in dark studio sweep; with it the character stands on the
+    Director's plate, and a contact shadow is baked in so they are not floating.
+    """
     act = normalize_action(action)
     dur = max(0.5, float(duration))
     num_frames = int(round(dur * fps))
@@ -582,24 +588,40 @@ def render_character_action_clip(character_img_path: str, action: str,
             alpha = cv2.GaussianBlur(alpha, (25, 25), 0)
             char_rgba = np.dstack([char_bgr, alpha])
 
-    # Generate studio background (sleek vertical backdrop with radial soft light)
+    # Plate: the Director's background if they chose one, else the built-in studio.
+    plate = None
+    if background:
+        from . import backgrounds as _bg
+        plate = _bg.plate(background, width=width, height=height)
     bg = np.zeros((height, width, 3), dtype=np.uint8)
     yy, xx = np.mgrid[0:height, 0:width]
-    # Subtle dark studio gradient: deep slate top to dark charcoal bottom
-    grad = (yy / float(height))
-    bg[:, :, 0] = (22 + grad * 12).astype(np.uint8)
-    bg[:, :, 1] = (26 + grad * 10).astype(np.uint8)
-    bg[:, :, 2] = (34 + grad * 8).astype(np.uint8)
+    if plate is not None:
+        bg[:, :, :] = plate
+        # one soft contact shadow where the feet meet the floor (a subject with no
+        # shadow on a light plate looks pasted in, which is exactly what it is)
+        sh = np.zeros((height, width), dtype=np.float32)
+        cv2.ellipse(sh, (width // 2, int(height * 0.865)),
+                    (max(12, int(width * 0.26)), max(4, int(height * 0.020))), 0, 0, 360, 1.0, -1)
+        sh = cv2.GaussianBlur(sh, (0, 0), max(2.0, height * 0.010))
+        light_plate = float(bg.mean()) > 150.0
+        bg = np.clip(bg.astype(np.float32) * (1.0 - sh[..., None] * (0.34 if light_plate else 0.5)),
+                     0, 255).astype(np.uint8)
+    else:
+        # Subtle dark studio gradient: deep slate top to dark charcoal bottom
+        grad = (yy / float(height))
+        bg[:, :, 0] = (22 + grad * 12).astype(np.uint8)
+        bg[:, :, 1] = (26 + grad * 10).astype(np.uint8)
+        bg[:, :, 2] = (34 + grad * 8).astype(np.uint8)
 
-    # Studio soft spotlight in center
-    spot = np.exp(-(((xx - width * 0.5) ** 2) / (2 * (width * 0.4) ** 2) +
-                    ((yy - height * 0.55) ** 2) / (2 * (height * 0.4) ** 2)))
-    for c, tint in enumerate([40, 50, 70]):
-        bg[:, :, c] = np.clip(bg[:, :, c].astype(np.float32) + spot * tint, 0, 255).astype(np.uint8)
+        # Studio soft spotlight in center
+        spot = np.exp(-(((xx - width * 0.5) ** 2) / (2 * (width * 0.4) ** 2) +
+                        ((yy - height * 0.55) ** 2) / (2 * (height * 0.4) ** 2)))
+        for c, tint in enumerate([40, 50, 70]):
+            bg[:, :, c] = np.clip(bg[:, :, c].astype(np.float32) + spot * tint, 0, 255).astype(np.uint8)
 
-    # Floor grid / horizon guide (modern creative stage)
-    horizon_y = int(height * 0.82)
-    cv2.line(bg, (0, horizon_y), (width, horizon_y), (45, 52, 65), 2)
+        # Floor grid / horizon guide (modern creative stage)
+        horizon_y = int(height * 0.82)
+        cv2.line(bg, (0, horizon_y), (width, horizon_y), (45, 52, 65), 2)
 
     # Render frames to pipe or temp directory
     tmp_avi = out_mp4 + ".tmp.avi"

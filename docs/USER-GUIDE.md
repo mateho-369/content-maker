@@ -90,6 +90,55 @@ approve/edit/regenerate flow (Mode B) before it locks.
 The scene breakdown — each scene's visual prompt, mood tag, and estimated
 duration, as decided by Stage 1.
 
+### Manual Control Panel (`🎛️ MANUAL Override`)
+Switching the header button to **MANUAL** adds a panel above the DAG with the
+two selectors the AUTO Director was deciding for you:
+
+- **Stages** — untick `sfx`, `qa`, `ambient`, `voice_final`… to skip them for
+  this run. The four stages a cut cannot exist without (`script`, `breakdown`,
+  `video`, `assemble`) are locked on: without them the run would produce no
+  MP4 at all. A skipped stage is recorded as **skipped · stage disabled for
+  this run**, never as done, and anything that waited on it is rewired to what
+  *fed* that stage — so switching QA off does not make assembly start before a
+  single clip exists.
+- **Scenes** — untick a scene to leave it out of this run. The same thing is on
+  every storyboard row (the **in run** tickbox); that one is stored on the scene,
+  so it survives a reload and applies to every later run until you tick it back.
+  A deselected scene is absent from its clips, its captions file, and the cut.
+- **Voice** — one dropdown, straight from `GET /api/voices`: the Edge-TTS
+  neural voices, the offline Sherpa voice, and the placeholder (labelled as
+  such, because shipping it is not an option). What you pick here is what
+  Stage 3a actually speaks with.
+- **Before you press run** — the summary the old button skipped: how many of
+  the jobs will really run, which scenes/stages are switched off, resolution,
+  which background each scene will be painted on, caption burn, and an ETA with
+  its basis (`measured on this machine` when there is history, otherwise the
+  board's own durations). It refuses nothing — it just means the number you
+  see is the number you get.
+- While a run is live the same panel becomes the progress line: `n/N stages ·
+  k jobs left · ≈ 3m 40s remaining (measured)`, with **pause**, **resume**,
+  **stop**, and **skip scene N and continue** — which drops the scene the run
+  has not started yet from everything downstream, without cancelling the run.
+
+### Background & Style
+Every scene is painted on a plate before the subject is composited onto it, and
+this card is where you choose it. The tiles are the *rendered* plates (the same
+code path the video renderer uses), not colour swatches:
+
+| type | what it does |
+| --- | --- |
+| ⬜ White Studio / ⬛ Black Studio | the two built-in cycloramas, key light and all |
+| 🎨 Gradient | your two colours, diagonal |
+| 🖼️ Custom Image | an upload, stored under the data dir and cover-cropped per frame |
+| 🤖 AI Generate | one plate per prompt, made by the image engine, cached, reused |
+| 🎭 Template | the six procedural environments (studio, nature, city, abstract, paper, neon) |
+
+A near-white plate with white subtitles is how captions "disappear", so the
+picker warns you before the run (and the QA gate measures the caption band of
+the finished file afterwards). Any single scene can override the project choice
+from its row on the board — the override wins, and the row shows a chip so you
+can see which is which.
+
 ### Pipeline · stage by stage
 A row per stage (`script → breakdown → voice_base → voice_final → video →
 video_fit → sfx → qa → assemble`), each showing live status
@@ -105,7 +154,10 @@ Click a stage's scene to open the **Inspector**:
   SQLite log — genuinely useful for understanding *why* a scene came out
   the way it did
 - **re-run this stage** with a different visual prompt / mood / ambience
-  instruction, without re-running the whole pipeline
+  instruction, without re-running the whole pipeline. From the board, a row's
+  **⟳** button does the same for one scene: it saves your wording, re-renders
+  that scene's clip, and rebuilds the cut — every other scene's finished clip is
+  reused, not paid for twice
 - **↻ Regenerate** / **🎨 previz test** buttons for quick iteration
 
 ### Files & downloads

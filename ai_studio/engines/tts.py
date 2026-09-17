@@ -212,8 +212,14 @@ def _sherpa_tts(cfg, model_onnx, tokens, model_dir):
 
 
 # ------------------------------------------------------------------ synthesis
-def synthesize(text, out_wav, cfg, engine="auto", progress=None, seed=0, emotion=None, emotion_style=None, provider_name=None):
-    """Speak `text` into `out_wav`. Returns a result dict (never raises)."""
+def synthesize(text, out_wav, cfg, engine="auto", progress=None, seed=0, emotion=None, emotion_style=None, provider_name=None,
+               voice=None):
+    """Speak `text` into `out_wav`. Returns a result dict (never raises).
+
+    ``voice`` overrides ``tts.voice`` for this call — that is how the per-project
+    pick in the Manual Control Panel reaches the engine without touching the
+    saved settings. Empty means "use what config says".
+    """
     cfg_t = cfg.get("tts", {})
     # [[silent: …]] spans are display-only: the words are never spoken
     text = khmer.spoken_text(text or "")
@@ -224,6 +230,9 @@ def synthesize(text, out_wav, cfg, engine="auto", progress=None, seed=0, emotion
 
     target_emotion = emotion or emotion_style or cfg_t.get("emotion") or cfg.get("pipeline", {}).get("emotion") or "calm"
     target_speed = float(cfg_t.get("speed", 1.0))
+    if voice:
+        cfg = dict(cfg or {})
+        cfg["tts"] = dict(cfg.get("tts") or {}, voice=voice)
     provider_id = provider_name or (engine if engine in ("edge_tts", "sherpa", "huggingface", "placeholder", "local_sherpa") else cfg_t.get("provider", "auto"))
 
     # Use unified provider architecture with emotional post-processing
@@ -269,8 +278,10 @@ def synthesize(text, out_wav, cfg, engine="auto", progress=None, seed=0, emotion
 def _try_edge_tts(text, out_wav, cfg, progress=None, attempts=None, emotion="neutral"):
     try:
         from .edge_tts_provider import EdgeTTSProvider
+        t = (cfg or {}).get("tts", {}) or {}
         provider = EdgeTTSProvider()
-        res = provider.synthesize_to_file(text, out_wav, gender="male", emotion=emotion)
+        res = provider.synthesize_to_file(text, out_wav, gender=t.get("gender") or "male",
+                                          emotion=emotion, voice=t.get("voice") or "")
         if res.get("ok") and os.path.exists(out_wav) and os.path.getsize(out_wav) > 100:
             return res
         if attempts is not None:

@@ -1,12 +1,17 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { api, Asset, Project, Run, Scene, StageRow, StageSpec, StylePreview } from "../api";
+import { ApiError, api, Asset, Project, QAResult, Run, Scene, StageRow, StageSpec, StylePreview } from "../api";
 import { useToast, errText } from "../main";
-import { Badge, Bar, Empty, Panel, StatusBadge, fmtDur, fmtSize, fmtTime, Spinner } from "../ui";
+import { Badge, Bar, Empty, Modal, Panel, StatusBadge, fmtDur, fmtSize, fmtTime, Spinner } from "../ui";
 import { CaptionStudio } from "./CaptionStudio";
+import { BackgroundPicker, BackgroundChip, backgroundLabel, Bg } from "../BackgroundPicker";
 
 interface Live {
   run_id?: string; status?: string; stages?: StageRow[]; overall?: { pct?: number }; events?: any[];
   error?: string; deferred_stages?: string[]; final_path?: string; duration?: number;
+  // measured countdown from /runs/{id}/status — null until jobs have been timed
+  eta?: { seconds?: number | null; remaining_jobs?: number; measured_jobs?: number;
+          confidence?: string; scene?: number | null; scene_total?: number | null;
+          avg_job_seconds?: number } | null;
 }
 
 export function ProjectView({ projectId, onOpen }: { projectId: string; onOpen: (v: string, id?: string) => void }) {
@@ -42,6 +47,34 @@ export function ProjectView({ projectId, onOpen }: { projectId: string; onOpen: 
 
   useEffect(() => { load(); }, [load]);
 
+  // A board save returns exactly what was stored (idx renumbered, meta kept), so
+  // the view adopts that instead of refetching project + settings + assets — the
+  // three round trips per dropdown click were the "editing scene text lags".
+  const adoptBoard = useCallback((project: Project, sc: Scene[]) => {
+    setProj((prev) => ({ ...(prev as Project), ...project, scenes: sc }));
+  }, []);
+
+  // one snapshot fetch, three outcomes: data, "this run is gone", "retry".
+  const refresh = useCallback(async (runId: string): Promise<Live | null | "retry"> => {
+    try {
+      const s = await api<Live>(`/runs/${runId}/status?since=0`);
+      setLive(s); setLiveMode((m) => m || "poll");
+      return s;
+    } catch (e) {
+      // 404 is permanent — the run row is gone (other data dir, deleted or
+      // duplicated project, pruned history). Drop the live view, refetch the
+      // project so the board/buttons agree with the DB, and stop asking. The old
+      // `catch {}` treated it as transient, which is the 404-per-2s wall in the
+      // console (1200 ticks = 40 minutes of it).
+      if (e instanceof ApiError && e.status === 404) { setLive(null); setLiveMode(""); load(); return null; }
+      return "retry";
+    }
+  }, [load]);
+
+  const flush = useCallback(() => { /* placeholder for animation flush */ }, []);
+
+  useEffect(() => () => { wsRef.current?.close(); }, []);
+
   // live WS with SSE + polling fallback
   const connect = useCallback((runId: string) => {
     const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -53,26 +86,23 @@ export function ProjectView({ projectId, onOpen }: { projectId: string; onOpen: 
       try {
         const m = JSON.parse(ev.data);
         if (m.kind === "snapshot") { setLive(m.payload); if (m.payload?.status) flush(); }
-        else if (m.kind === "stage_update" || m.kind === "stage_failed") { setLive((x) => x || {}); refresh(runId); }
+        else if (m.kind === "stage_update" || m.kind === "stage_failed") {
+          setLive((x) => x || {}); refresh(runId);
+          // scenes are written by these two stages, so the board (and the
+          // "Scene board (0)" the manual workflow started from) only updates
+          // when the project itself is refetched — the live snapshot alone
+          // never carries them
+          if (m.kind === "stage_update" && ["script", "breakdown"].includes(m.stage)
+              && m.payload?.status === "done") load();
+        }
         else if (m.kind === "log") { setLog((x) => [...x.slice(-200), m.payload]); }
-        else if (m.kind === "run_finished") { setLive(m.payload); refresh(runId); }
+        else if (m.kind === "run_finished") { setLive(m.payload); refresh(runId); load(); }
       } catch {}
     };
     ws.onclose = () => { setLiveMode("poll"); /* SSE + polling keep it honest */ };
     wsRef.current = ws;
     return ws;
-  }, []);
-
-  const refresh = useCallback(async (runId: string) => {
-    try {
-      const s = await api<Live>(`/runs/${runId}/status?since=0`);
-      setLive(s); setLiveMode((m) => m || "poll");
-    } catch {}
-  }, []);
-
-  const flush = useCallback(() => { /* placeholder for animation flush */ }, []);
-
-  useEffect(() => () => { wsRef.current?.close(); }, []);
+  }, [load, refresh]);
 
   const startRun = async (payload: any = {}) => {
     setBusy("starting");
@@ -89,13 +119,12 @@ export function ProjectView({ projectId, onOpen }: { projectId: string; onOpen: 
   const poll = useCallback(async (runId: string) => {
     for (let i = 0; i < 1200; i++) {
       await new Promise((r) => setTimeout(r, 2000));
-      try {
-        const s = await api<Live>(`/runs/${runId}/status?since=0`);
-        setLive(s); setLiveMode((m) => m || "poll");
-        if (s.status && !["running", "queued", "paused"].includes(s.status)) { load(); setLiveMode(""); return; }
-      } catch { /* transient */ }
+      const s = await refresh(runId);
+      if (s === null) return;                       // run vanished — refresh() recovered
+      if (s === "retry") continue;                  // network hiccup, next tick
+      if (s.status && !["running", "queued", "paused"].includes(s.status)) { load(); setLiveMode(""); return; }
     }
-  }, [load]);
+  }, [load, refresh]);
 
   const act = async (verb: string, path: string, body?: any, okMsg = "") => {
     setBusy(verb);
@@ -191,11 +220,14 @@ export function ProjectView({ projectId, onOpen }: { projectId: string; onOpen: 
           {workflowTab === "board" && (
             <>
               <PipelineDAG stages={stages} rows={runRows} onStage={(k) => setSelStage(k)} />
+              <RunControlPanel proj={proj} scenes={sc} stages={stages} live={live} busy={busy}
+                onRun={startRun} onChanged={load} act={act} />
               <CaptionStudio projectId={proj.id} initial={capStyle} onChanged={load} />
               <SceneBoard proj={proj} scenes={sc} rows={runRows} assets={assets} sel={selScene}
-                onSel={setSelScene} onChanged={load} act={act} busy={busy} />
+                onSel={setSelScene} onChanged={load} onAdopt={adoptBoard} act={act} busy={busy} />
               <ScriptPanel proj={proj} onChanged={load} act={act} busy={busy} />
               <EventLog log={log} rows={runRows} />
+              <BackgroundPanel proj={proj} scenes={sc} onChanged={load} act={act} busy={busy} />
             </>
           )}
         </div>
@@ -303,34 +335,48 @@ function ContentDirectorPanel({ proj, scenes, onChanged }: { proj: Project; scen
   );
 }
 
-function QAGatePanel({ proj, scenes, assets }: { proj: Project; scenes: Scene[]; assets: Asset[] }) {
-  const [qaRes, setQaRes] = useState<any>(null);
+function QAGatePanel({ proj, scenes }: { proj: Project; scenes: Scene[]; assets: Asset[] }) {
+  const [qaRes, setQaRes] = useState<QAResult | null>(null);
   const [loading, setLoading] = useState(false);
   const toast = useToast();
 
-  const runQA = async () => {
+  const runQA = async (announce = true) => {
     setLoading(true);
     try {
-      const res = await api<any>(`/qa/project/${proj.id}`);
+      const res = await api<QAResult>(`/qa/project/${proj.id}`);
       setQaRes(res);
+      // Only an explicit click may toast. The mount-time call fires for every
+      // draft project, and "QA Gate flagged issues" on a project nobody has
+      // rendered yet is noise dressed up as a defect.
+      if (!announce || res?.pending) return;
       toast(res.approved ? "QA Gate Passed: Ready to Ship!" : "QA Gate flagged issues", res.approved ? "ok" : "warn");
     } catch (e) {
-      toast(errText(e), "err");
+      if (announce) toast(errText(e), "err");
     } finally {
       setLoading(false);
     }
   };
 
-  useEffect(() => { runQA(); }, [proj.id]);
+  useEffect(() => { runQA(false); }, [proj.id]);
+
+  // Never assume a field survived the round trip: reading `.some()` on an
+  // absent `failures` array used to blank the whole view.
+  const failures: any[] = qaRes?.failures || [];
+  const warnings: any[] = qaRes?.warnings || [];
+  const flagged = (list: any[], check: string) => list.some((x) => x?.check === check);
 
   return (
     <Panel title="Automated QA Gate · Pre-Delivery Compliance" right={
-      <button className="btn tiny primary" onClick={runQA} disabled={loading}>
+      <button className="btn tiny primary" onClick={() => runQA(true)} disabled={loading}>
         {loading ? "Auditing…" : "🛡️ Run Full QA Audit"}
       </button>
     }>
       <div className="panel-b">
-        {qaRes ? (
+        {qaRes?.pending ? (
+          // the server says which step is missing (no script vs no scenes vs no
+          // render); a hardcoded sentence here was wrong for two of the three
+          <div className="hint">{qaRes.message || "Nothing to audit yet — run the pipeline first."}</div>
+        ) : qaRes ? (
           <div>
             <div className="spread" style={{ marginBottom: 12 }}>
               <div>
@@ -340,7 +386,7 @@ function QAGatePanel({ proj, scenes, assets }: { proj: Project; scenes: Scene[];
                 </Badge>
               </div>
               <div className="hint">
-                {qaRes.total_scenes} scenes · {qaRes.fail_count} failures · {qaRes.warn_count} warnings
+                {qaRes.total_scenes ?? scenes.length} scenes · {failures.length} failures · {warnings.length} warnings
               </div>
             </div>
 
@@ -348,48 +394,50 @@ function QAGatePanel({ proj, scenes, assets }: { proj: Project; scenes: Scene[];
             <div className="cards" style={{ gridTemplateColumns: "repeat(3, 1fr)", marginBottom: 14 }}>
               <div className="ct-card">
                 <b>1. Khmer Typography & Subscripts</b>
-                <div style={{ marginTop: 4, color: qaRes.failures.some((f: any) => f.check === "khmer_clusters") ? "var(--red)" : "var(--green)" }}>
-                  {qaRes.failures.some((f: any) => f.check === "khmer_clusters") ? "❌ Broken Consonant Cluster" : "✓ Subscripts & HarfBuzz Normalization Valid"}
+                <div style={{ marginTop: 4, color: flagged(failures, "khmer_clusters") ? "var(--red)" : "var(--green)" }}>
+                  {flagged(failures, "khmer_clusters") ? "❌ Broken Consonant Cluster" : "✓ Subscripts & HarfBuzz Normalization Valid"}
                 </div>
               </div>
               <div className="ct-card">
                 <b>2. Script & Viral Hook</b>
-                <div style={{ marginTop: 4, color: qaRes.warnings.some((w: any) => w.check === "hook_pacing") ? "var(--yellow)" : "var(--green)" }}>
-                  {qaRes.warnings.some((w: any) => w.check === "hook_pacing") ? "⚠️ Scene 1 Hook Needs Tightening" : "✓ 1-3s Hook Optimized"}
+                <div style={{ marginTop: 4, color: flagged(warnings, "hook_pacing") ? "var(--yellow)" : "var(--green)" }}>
+                  {flagged(warnings, "hook_pacing") ? "⚠️ Scene 1 Hook Needs Tightening" : "✓ 1-3s Hook Optimized"}
                 </div>
               </div>
               <div className="ct-card">
                 <b>3. Final MP4 Container</b>
                 <div style={{ marginTop: 4, color: qaRes.mp4_verified ? "var(--green)" : "var(--tx2)" }}>
-                  {qaRes.mp4_verified ? "✓ 9:16 Vertical Video Valid" : "○ Export Pending"}
+                  {qaRes.mp4_verified ? "✓ 9:16 Vertical Video Valid"
+                    : qaRes.mp4_checked ? "❌ A render was found but it failed its checks"
+                    : "○ Nothing exported yet"}
                 </div>
               </div>
             </div>
 
-            {qaRes.failures.length > 0 && (
+            {failures.length > 0 && (
               <div className="errbar" style={{ marginBottom: 8 }}>
                 <b>Failures:</b>
                 <ul style={{ margin: "4px 0 0 16px", padding: 0 }}>
-                  {qaRes.failures.map((f: any, idx: number) => (
-                    <li key={idx}>[{f.check}] Scene {f.scene_idx !== undefined ? f.scene_idx + 1 : "General"}: {f.issue}</li>
+                  {failures.map((f: any, idx: number) => (
+                    <li key={idx}>[{f?.check}] Scene {f?.scene_idx !== undefined ? f.scene_idx + 1 : "General"}: {f?.issue}</li>
                   ))}
                 </ul>
               </div>
             )}
 
-            {qaRes.warnings.length > 0 && (
+            {warnings.length > 0 && (
               <div style={{ background: "#2e2a1d", border: "1px solid #665020", borderRadius: 4, padding: 8, color: "var(--yellow)" }}>
                 <b>Warnings:</b>
                 <ul style={{ margin: "4px 0 0 16px", padding: 0 }}>
-                  {qaRes.warnings.map((w: any, idx: number) => (
-                    <li key={idx}>[{w.check}] Scene {w.scene_idx !== undefined ? w.scene_idx + 1 : "General"}: {w.issue}</li>
+                  {warnings.map((w: any, idx: number) => (
+                    <li key={idx}>[{w?.check}] Scene {w?.scene_idx !== undefined ? w.scene_idx + 1 : "General"}: {w?.issue}</li>
                   ))}
                 </ul>
               </div>
             )}
           </div>
         ) : (
-          <div className="hint">Click "Run Full QA Audit" to verify all script clusters, voice loudness, and video assets.</div>
+          <div className="hint">{loading ? "Auditing…" : "Click \"Run Full QA Audit\" to verify all script clusters, voice loudness, and video assets."}</div>
         )}
       </div>
     </Panel>
@@ -433,35 +481,92 @@ function PipelineDAG({ stages, rows, onStage }: {
   );
 }
 
-function SceneBoard({ proj, scenes, rows, assets, sel, onSel, onChanged, act, busy }: {
+const BLANK_SCENE: Scene = { idx: 0, text: "", visual_prompt: "", mood_tag: "calm-warm",
+  estimated_duration_sec: 0, audio_duration: 0, sfx_prompt: "", meta: {} };
+
+function SceneBoard({ proj, scenes, rows, assets, sel, onSel, onChanged, onAdopt, act, busy }: {
   proj: Project; scenes: Scene[]; rows: StageRow[]; assets: Asset[]; sel: number; onSel: (i: number) => void;
-  onChanged: () => void; act: (v: string, p: string, b?: any, ok?: string) => Promise<any>; busy: string;
+  onChanged: () => void; onAdopt?: (project: Project, scenes: Scene[]) => void;
+  act: (v: string, p: string, b?: any, ok?: string) => Promise<any>; busy: string;
 }) {
   const toast = useToast();
   const [draft, setDraft] = useState<Scene[]>(scenes);
-  useEffect(() => { setDraft(scenes); }, [scenes]);
-  const save = async () => {
+  const [dirty, setDirty] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [paste, setPaste] = useState("");
+  const [bgRow, setBgRow] = useState(-1);      // which row has its background open
+  const draftRef = useRef(draft); draftRef.current = draft;   // a queued save must post the latest rows
+  const timer = useRef<number | null>(null);
+  // re-seed only when the stored content changes: `scenes` got a new array
+  // identity on every live tick, which used to wipe half-typed narration
+  const sig = scenes.map((s) => `${s.text}\u0001${JSON.stringify(s.meta || {})}`).join("\u0002");
+  useEffect(() => { setDraft(scenes); setDirty(false); }, [sig]);
+  useEffect(() => () => { if (timer.current) window.clearTimeout(timer.current); }, []);
+
+  const save = useCallback(async (announce = true) => {
+    if (timer.current) { window.clearTimeout(timer.current); timer.current = null; }
+    const body = { scenes: draftRef.current.map((d) => ({ ...d, idx: undefined })) };
+    if (!body.scenes.length) {
+      toast("the board is empty — “+ add scene” makes a row, “⤓ import script” makes one per line", "warn");
+      return;
+    }
     try {
-      await api(`/projects/${proj.id}/scenes`, { method: "POST", json: { scenes: draft.map((d) => ({ ...d, idx: undefined })) } });
-      toast("storyboard saved", "ok"); onChanged();
-    } catch (e) { toast(errText(e), "err"); }
+      const r = await api<any>(`/projects/${proj.id}/scenes`, { method: "POST", json: body });
+      setDraft(r.scenes || []); setDirty(false);
+      if (r.project && onAdopt) onAdopt(r.project, r.scenes || []); else onChanged();
+      if (announce) toast(r.note || "storyboard saved", "ok");
+    } catch (e) { toast(errText(e), "err"); }   // a failed autosave still says so
+  }, [proj.id, onChanged, onAdopt]);
+
+  const queueSave = useCallback(() => {
+    setDirty(true);
+    if (timer.current) window.clearTimeout(timer.current);
+    // An unfinished row makes the whole save invalid (the server refuses rather
+    // than dropping it), so autosave waits for the Director to press save board —
+    // otherwise every picker click would answer with an error toast.
+    if (draftRef.current.some((r) => !String(r.text || "").trim())) return;
+    timer.current = window.setTimeout(() => { timer.current = null; save(false); }, 500);
+  }, [save]);
+
+  const edit = (mutate: (list: Scene[]) => Scene[], autosave = false) => {
+    setDraft(mutate(draftRef.current)); setDirty(true);
+    if (autosave) queueSave();
+  };
+  const addScene = (at?: number) => {
+    const i = at === undefined ? draftRef.current.length : at;
+    edit((x) => { const c = [...x]; c.splice(i, 0, { ...BLANK_SCENE, meta: {} }); return c; });
+    onSel(i);
+  };
+  const duplicateScene = (i: number) => edit((x) => {
+    const c = [...x]; c.splice(i + 1, 0, { ...c[i], meta: { ...(c[i].meta || {}) } }); return c;
+  });
+  const removeScene = (i: number) => {
+    edit((x) => x.filter((_, j) => j !== i));
+    toast("row removed — save board to drop it from the project", "info");
+  };
+  const moveScene = (i: number, dir: number) => edit((x) => {
+    const j = i + dir; if (j < 0 || j >= x.length) return x;
+    const c = [...x]; [c[i], c[j]] = [c[j], c[i]]; return c;
+  });
+  const importPaste = () => {
+    const lines = paste.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    if (!lines.length) return;
+    edit((x) => [...x, ...lines.map((text) => ({ ...BLANK_SCENE, text, meta: {} }))]);
+    setPaste(""); setImporting(false);
+    toast(`${lines.length} scene(s) added — save board to store them`, "ok");
   };
   const uploadImage = async (idx: number, f: File) => {
     const fd = new FormData(); fd.append("image", f);
     try { await api(`/projects/${proj.id}/scenes/${idx}/image`, { method: "POST", form: fd }); toast("scene image uploaded", "ok"); onChanged(); }
     catch (e) { toast(errText(e), "err"); }
   };
-  const patchScene = async (idx: number, meta: Record<string, any>) => {
-    const sc = draft[idx]; if (!sc) return;
-    await saveWith(async () => {
-      const next = draft.map((s, i) => i === idx ? { ...s, meta: { ...s.meta, ...meta } } : s);
-      setDraft(next);
-    });
-  };
-  const saveWith = async (mutate?: () => void) => {
-    if (mutate) mutate();
-    await save();
-  };
+  const patchScene = (idx: number, meta: Record<string, any>) =>
+    edit((x) => x.map((s, i) => i === idx ? { ...s, meta: { ...s.meta, ...meta } } : s), true);
+  // a stable (scene, key, value) sink — that is what lets a row's pickers be
+  // memoized: only primitives and this one callback reach them
+  const pickMeta = useCallback((idx: number, key: string, value: any) => {
+    patchScene(idx, { [key]: value });
+  }, [queueSave]);                                       // eslint-disable-line react-hooks/exhaustive-deps
   const stageFor = (idx: number, stage: string) => rows.find((r) => r.stage === stage && r.scene_idx === idx);
 
   // content-type structure grouping: compare → A / B / summary; word_nuance → meaning-1 / meaning-2 / contrast
@@ -489,95 +594,228 @@ function SceneBoard({ proj, scenes, rows, assets, sel, onSel, onChanged, act, bu
   });
 
   return (
-    <Panel title={`Scene board (${scenes.length})`}
-      right={<button className="btn tiny primary" onClick={save} disabled={busy === "board"}>save board</button>}>
+    <Panel title={`Scene board (${draft.length}${dirty ? " · unsaved" : ""})`}
+      right={<div className="row" style={{ gap: 4 }}>
+        <button className="btn tiny" onClick={() => addScene()} title="append one empty scene">+ add scene</button>
+        <button className="btn tiny" onClick={() => setImporting(true)} title="paste a script: one line = one scene">⤓ import script</button>
+        <button className={`btn tiny ${dirty ? "primary" : ""}`} onClick={() => save(true)} disabled={busy === "board"}>
+          {dirty ? "save board ●" : "save board"}
+        </button>
+      </div>}>
+      {!draft.length ? (
+        <div className="panel-b" style={{ padding: "20px 12px", textAlign: "center" }}>
+          <div className="hint" style={{ marginBottom: 10 }}>
+            Nothing on the board yet — one line of narration per scene.{" "}
+            {proj.script ? "“⤓ import script” turns the saved script into rows." : " Paste the script first, then import it."}
+          </div>
+          <div className="row" style={{ justifyContent: "center", gap: 6 }}>
+            <button className="btn tiny primary" onClick={() => addScene(0)}>+ add scene</button>
+            <button className="btn tiny" onClick={() => setImporting(true)}>⤓ import script</button>
+          </div>
+        </div>
+      ) : (
       <table className="grid">
         <thead>
           <tr>
-            <th style={{ width: 25 }}>#</th>
+            <th style={{ width: 76 }}>#</th>
             <th>narration</th>
             <th style={{ width: 140 }}>action & prop</th>
             <th style={{ width: 110 }}>emotion</th>
             <th style={{ width: 130 }}>visual source</th>
-            <th style={{ width: 60 }}>⏱</th>
+            <th style={{ width: 92 }}>background</th>
+            <th style={{ width: 62 }}>⏱</th>
             <th style={{ width: 110 }}>production</th>
+            <th style={{ width: 46 }} title="tick to render this scene in the next run">in run</th>
           </tr>
         </thead>
         <tbody>
           {grouped.map((g, gi) => (
             <React.Fragment key={gi}>
-              {g.label && <tr className="group-head"><td colSpan={7}>{g.label}</td></tr>}
-              {g.items.map((s, i) => {
+              {g.label && <tr className="group-head"><td colSpan={9}>{g.label}</td></tr>}
+              {g.items.map((si) => {
+                // `grouped[].items` holds SCENE INDICES. The row used to treat that
+                // number as the scene object and use the group-relative counter as
+                // the row id — so on a grouped board (compare / word_nuance /
+                // myth_vs_fact / choose) every cell read `undefined`, the pickers
+                // showed defaults, and each edit wrote to the wrong scene.
+                const s = draft[si];
+                if (!s) return null;
                 const vs = s.meta?.visual_source || (hasChar(proj, s) ? "character_action" : "illustration");
+                const stop = (e: React.MouseEvent) => e.stopPropagation();
+                const sel2 = (fn: () => void) => (e: React.MouseEvent) => { stop(e); fn(); };
                 return (
-                  <tr key={i} onClick={() => onSel(i)} style={{ cursor: "pointer", background: sel === i ? "#242a35" : undefined }}>
-                    <td><b>{i + 1}</b>{s.meta?.side ? <><br /><Badge>{s.meta.side}</Badge></> : null}</td>
+                <React.Fragment key={si}>
+                  <tr onClick={() => onSel(si)} style={{ cursor: "pointer", background: sel === si ? "#242a35" : undefined }}>
+                    <td>
+                      <b>{si + 1}</b>
+                      {s.meta?.side ? <><br /><Badge>{s.meta.side}</Badge></> : null}
+                      <div className="row" style={{ gap: 2, marginTop: 3 }}>
+                        <button className="btn tiny" title="duplicate this scene" onClick={sel2(() => duplicateScene(si))}>⧉</button>
+                        <button className="btn tiny" title="move up" onClick={sel2(() => moveScene(si, -1))}>↑</button>
+                        <button className="btn tiny" title="move down" onClick={sel2(() => moveScene(si, 1))}>↓</button>
+                        <button className="btn tiny" title="remove this row (save board to apply)" onClick={sel2(() => removeScene(si))}>✕</button>
+                      </div>
+                    </td>
                     <td>
                       <textarea className="scene-text" lang="km" spellCheck={false} value={s.text} rows={2}
-                        onChange={(e) => setDraft(draft.map((x, j) => j === i ? { ...x, text: e.target.value } : x))} />
+                        onChange={(e) => edit((x) => x.map((y, j) => j === si ? { ...y, text: e.target.value } : y))} />
                       {s.meta?.character_id ? <div className="hint">🧑 {s.meta.character_id.slice(0, 10)}</div> : null}
                     </td>
                     <td>
-                      <select value={s.meta?.character_action || "talking"} style={{ width: "100%", padding: "2px 4px", fontSize: 11 }}
-                        onChange={(e) => patchScene(i, { character_action: e.target.value })}>
-                        {ACTIONS.map((a) => <option key={a} value={a}>🎭 {a}</option>)}
-                      </select>
-                      <select value={s.meta?.prop || "none"} style={{ width: "100%", padding: "2px 4px", fontSize: 11, marginTop: 3 }}
-                        onChange={(e) => patchScene(i, { prop: e.target.value })}>
-                        {PROPS.map((p) => <option key={p} value={p}>📦 {p}</option>)}
-                      </select>
+                      <RowPickers si={si} action={s.meta?.character_action || "talking"}
+                        prop={s.meta?.prop || "none"} onPick={pickMeta} />
                     </td>
                     <td>
-                      <select value={s.meta?.emotion_style || s.mood_tag || "calm"} style={{ width: "100%", padding: "2px 4px", fontSize: 11 }}
-                        onChange={(e) => patchScene(i, { emotion_style: e.target.value })}>
+                      {/* a mood slug ("calm-warm", "rain-soft") is NOT an emotion style:
+                          feeding it to this select gave a controlled value with no matching
+                          option, so the row displayed "calm" while the DB said something else.
+                          Show the style that will actually be applied, keep the mood visible. */}
+                      <select value={s.meta?.emotion_style || (EMOTIONS.includes(s.mood_tag) ? s.mood_tag : "calm")}
+                        style={{ width: "100%", padding: "2px 4px", fontSize: 11 }}
+                        onChange={(e) => patchScene(si, { emotion_style: e.target.value })}>
                         {EMOTIONS.map((em) => <option key={em} value={em}>🎙️ {em}</option>)}
                       </select>
+                      {s.mood_tag && s.mood_tag !== s.meta?.emotion_style ? <div className="hint" style={{ fontSize: 10 }}>mood: {s.mood_tag}</div> : null}
                     </td>
                     <td>
                       <VisualSourceControl value={vs} hasChar={hasChar(proj, s)}
-                        onChange={(v) => patchScene(i, { visual_source: v })} />
+                        onChange={(v) => patchScene(si, { visual_source: v })} />
                       {vs === "meme" && (
                         <select value={s.meta?.meme_type || "reaction_shock"} style={{ width: "100%", padding: "2px 4px", fontSize: 11, marginTop: 3 }}
-                          onChange={(e) => patchScene(i, { meme_type: e.target.value })}>
+                          onChange={(e) => patchScene(si, { meme_type: e.target.value })}>
                           {MEMES.map((m) => <option key={m} value={m}>⚡ {m.replace("reaction_", "")}</option>)}
                         </select>
                       )}
                     </td>
-                    <td className="mono">{fmtDur(s.estimated_duration_sec)}</td>
+                    <td>
+                      <button className="btn tiny bgbtn" title={backgroundLabel(s.meta?.background)}
+                        onClick={sel2(() => setBgRow(bgRow === si ? -1 : si))} data-testid={`bg-row-${si}`}>
+                        <BackgroundChip bg={s.meta?.background} size={18} />
+                        <span className="bgbtn-cap">{s.meta?.background ? "override" : "default"}</span>
+                      </button>
+                    </td>
+                    <td className="mono">
+                      {fmtDur(s.estimated_duration_sec)}
+                      <input type="number" min={1} max={30} step={0.5} title="planned scene length (s)"
+                        value={s.estimated_duration_sec || ""} style={{ width: "100%", marginTop: 3, padding: "1px 4px", fontSize: 11 }}
+                        onChange={(e) => edit((x) => x.map((y, j) => j === si ? { ...y, estimated_duration_sec: Number(e.target.value) || 0 } : y))} />
+                    </td>
                     <td>
                       {hasChar(proj, s) && (
                         <div className="row" style={{ marginBottom: 3 }}>
                           <select value={s.meta?.render_mode || "broll"} style={{ width: "100%", padding: "2px 4px", fontSize: 11 }}
-                            onChange={(e) => patchScene(i, { render_mode: e.target.value })}>
+                            onChange={(e) => patchScene(si, { render_mode: e.target.value })}>
                             <option value="broll">b-roll</option><option value="talking_head">talking head</option>
                           </select>
                         </div>
                       )}
                       <div className="row" style={{ gap: 4 }}>
-                        <input type="file" accept="image/*" style={{ display: "none" }} id={`img-${i}`}
-                          onChange={(e) => e.target.files?.[0] && uploadImage(i, e.target.files[0])} />
-                        <button className="btn tiny" onClick={() => document.getElementById(`img-${i}`)?.click()}>⬆ img</button>
-                        <a className="btn tiny" href={`/api/projects/${proj.id}/scene/${i}/download`}>zip</a>
+                        <input type="file" accept="image/*" style={{ display: "none" }} id={`img-${si}`}
+                          onChange={(e) => e.target.files?.[0] && uploadImage(si, e.target.files[0])} />
+                        <button className="btn tiny" onClick={sel2(() => document.getElementById(`img-${si}`)?.click())}>⬆ img</button>
+                        <a className="btn tiny" href={`/api/projects/${proj.id}/scene/${si}/download`} onClick={stop}>zip</a>
+                        {/* the row's own text is saved with it, so one click covers
+                            "I changed this line, redo just this shot" — other scenes
+                            keep their finished clips and only the cut is rebuilt */}
+                        {proj.last_run_id ? (
+                          <button className="btn tiny" data-testid={`rerender-${si}`} disabled={!!busy}
+                            title="save the board, then re-render this scene's clip and rebuild the cut"
+                            onClick={sel2(async () => {
+                              await save(false);
+                              const r = await act("regenerate",
+                                `/runs/${proj.last_run_id}/stages/video/regenerate`,
+                                { scene_idx: si }, `scene ${si + 1} re-rendering`);
+                              if (r?.run_id) onChanged();
+                            })}>⟳</button>
+                        ) : null}
                       </div>
                       <div className="hint" style={{ marginTop: 3, fontSize: 10 }}>
                         {["voice_final", "video", "video_fit", "ambient"].map((k) => {
-                          const r = stageFor(i, k);
+                          const r = stageFor(si, k);
                           return r ? <span key={k}>{k.replace("_final", "").replace("_fit", "")}:{r.status[0]} </span> : null;
                         })}
                       </div>
                     </td>
+                    <td>
+                      <input type="checkbox" style={{ width: 15, height: 15, cursor: "pointer" }}
+                        checked={!s.meta?.disabled} title={s.meta?.disabled
+                          ? "deselected — every stage, the captions and the cut skip this scene"
+                          : "included in the next run"}
+                        data-testid={`scene-in-run-${si}`}
+                        onChange={(e) => patchScene(si, { disabled: !e.target.checked })} />
+                    </td>
                   </tr>
+                  {/* one open row is enough: it writes scene.meta.background, which
+                      every render path (previz, ComfyUI, Illux, talking head) paints
+                      behind the subject — an override here beats the project setting */}
+                  {bgRow === si && (
+                    <tr className="bg-expand"><td colSpan={9}>
+                      <div className="spread" style={{ marginBottom: 6 }}>
+                        <b style={{ fontSize: 12 }}>Background for scene {si + 1}</b>
+                        <span className="row" style={{ gap: 4 }}>
+                          <button className="btn tiny" onClick={() => { patchScene(si, { background: null }); setBgRow(-1); }}
+                            title="drop the override and inherit the project background">inherit project default</button>
+                          <button className="btn tiny primary" onClick={() => { save(false); setBgRow(-1); }}>done</button>
+                        </span>
+                      </div>
+                      <BackgroundPicker projectId={proj.id} dense
+                        value={s.meta?.background || null}
+                        onChange={(next) => patchScene(si, { background: next })} />
+                    </td></tr>
+                  )}
+                </React.Fragment>
                 );
               })}
             </React.Fragment>
           ))}
         </tbody>
       </table>
+      )}
+      {importing && (
+        <Modal title="import a script · one line = one scene" onClose={() => setImporting(false)}>
+          <textarea className="scene-text" lang="km" rows={12} style={{ width: "100%", fontFamily: "inherit" }}
+            value={paste} onChange={(e) => setPaste(e.target.value)}
+            placeholder={"each non-empty line becomes one scene\nMode A keeps your wording exactly — nothing is rewritten"} />
+          <div className="spread" style={{ marginTop: 10 }}>
+            <span className="hint">
+              {paste.split(/\r?\n/).filter((l) => l.trim()).length} scene(s) · appended after scene {draft.length}
+            </span>
+            <div className="row" style={{ gap: 6 }}>
+              <button className="btn" onClick={() => setImporting(false)}>cancel</button>
+              <button className="btn primary" onClick={importPaste}
+                disabled={!paste.split(/\r?\n/).filter((l) => l.trim()).length}>add to board</button>
+            </div>
+          </div>
+        </Modal>
+      )}
     </Panel>
   );
 }
 
 function hasChar(p: Project, s: Scene) { return !!p.character_id || !!s.meta?.character_id; }
+
+/**
+ * One row's action + prop selects, memoized. A full board is 15 rows × several
+ * controls, and every keystroke in a narration box re-rendered all of them (the
+ * "typing lags" complaint). Props here are primitives plus one stable callback, so
+ * React.memo actually hits.
+ */
+const RowPickers = React.memo(function RowPickers({ si, action, prop, onPick }: {
+  si: number; action: string; prop: string; onPick: (idx: number, key: string, v: any) => void;
+}) {
+  return (
+    <>
+      <select value={action} style={{ width: "100%", padding: "2px 4px", fontSize: 11 }}
+        onChange={(e) => onPick(si, "character_action", e.target.value)}>
+        {ACTIONS.map((a) => <option key={a} value={a}>🎭 {a}</option>)}
+      </select>
+      <select value={prop} style={{ width: "100%", padding: "2px 4px", fontSize: 11, marginTop: 3 }}
+        onChange={(e) => onPick(si, "prop", e.target.value)}>
+        {PROPS.map((pr) => <option key={pr} value={pr}>📦 {pr}</option>)}
+      </select>
+    </>
+  );
+});
 
 export function VisualSourceControl({ value, hasChar, onChange }: {
   value: string; hasChar: boolean; onChange: (v: string) => void;
@@ -658,21 +896,45 @@ function Waveform({ assetId }: { assetId: string }) {
   return <canvas ref={ref} className="wave" title="audio waveform" style={{ height: 34, width: 140, flex: "0 0 140px" }} />;
 }
 
+/**
+ * The log keeps every line a run produces — 10k on a long render. Rendering all of
+ * them is what made the panel stutter, so only a window is mounted, and "follow"
+ * keeps it pinned to the newest line. Older lines are one click away, not lost.
+ */
 function EventLog({ log, rows }: { log: any[]; rows: StageRow[] }) {
+  const [expanded, setExpanded] = useState(0);      // how many extra lines to mount
+  const [follow, setFollow] = useState(true);
+  const errs = rows.filter((r) => r.error);
+  const msgs = rows.filter((r) => r.message).slice(-40);
+  const WINDOW = 80;
+  const shown = follow ? log.slice(-WINDOW - expanded) : log.slice(0, WINDOW + expanded);
+  const hidden = log.length - shown.length;
   return (
-    <Panel title="Event log" scroll>
-      <div className="log">
-        {rows.filter((r) => r.error).map((r) => (
+    <Panel title={`Event log${log.length ? ` · ${log.length} lines` : ""}`} scroll right={
+      <span className="row" style={{ gap: 6 }}>
+        <button className="btn tiny" onClick={() => setFollow((f) => !f)}
+          title="keep the newest line in view">{follow ? "⬇ follow" : "⬆ scrolled back"}</button>
+        {hidden > 0 ? (
+          <button className="btn tiny" data-testid="log-more"
+            onClick={() => setExpanded((e) => e + 200)}>show {Math.min(200, hidden)} more</button>
+        ) : null}
+      </span>
+    }>
+      <div className="log" data-testid="event-log">
+        {errs.map((r) => (
           <div key={r.id} className="l-err">[{r.stage}#{r.scene_idx}] {r.error}</div>
         ))}
-        {rows.filter((r) => r.message).slice(-40).map((r) => (
+        {msgs.map((r) => (
           <div key={r.id} className={`l-${r.status === "failed" ? "err" : r.status === "done" ? "ok" : ""}`}>
             [{r.stage}#{r.scene_idx}] {r.status}: {r.message}
           </div>
         ))}
-        {log.slice(-120).map((l, i) => (
-          <div key={i} className={`l-${l.level || ""}`}>{(l.text || l.line || JSON.stringify(l)).slice(0, 400)}</div>
+        {shown.map((l, i) => (
+          <div key={`${follow ? "f" : "b"}-${(log.length - shown.length) + i}`} className={`l-${l.level || ""}`}>
+            {(l.text || l.line || JSON.stringify(l)).slice(0, 400)}
+          </div>
         ))}
+        {hidden > 0 && follow ? <div className="hint">…{hidden} older line(s) hidden by the window</div> : null}
       </div>
     </Panel>
   );
@@ -713,7 +975,9 @@ function Inspector({ proj, scenes, stage, scene, assets, rows, onChanged, act, b
   const srt = assets.find((x) => x.kind === "srt");
   const instProps = (x: Asset | undefined) => x && (
     <details key={x.kind} style={{ marginBottom: 6 }}>
-      <summary className="hint">{x.kind} · {x.engine || ""} · {fmtDur(x.duration)}</summary>
+      {/* the engine lives in meta.engine (there is no top-level column) — reading
+          x.engine printed an empty label for every asset, always */}
+      <summary className="hint">{x.kind} · {x.meta?.engine || ""} · {fmtDur(x.duration)}</summary>
       <video controls preload="metadata" src={`/api/assets/${x.id}/stream`} style={{ marginTop: 4 }} />
       <div className="row" style={{ gap: 4, marginTop: 4 }}>
         <a className="btn tiny" href={`/api/assets/${x.id}/download`}>download</a>
@@ -835,5 +1099,287 @@ function ModeBGate({ proj, onOpen, onChanged, act, busy }: {
         </div>
       </Panel>
     </div>
+  );
+}
+
+// ─────────────────────────────────────── manual control: stages, scenes, pre-run plan
+const CORE_STAGES = ["script", "breakdown", "video", "assemble"];
+
+function fmtEta(sec?: number | null): string {
+  if (sec === null || sec === undefined) return "measuring…";
+  if (sec < 60) return `${Math.round(sec)}s`;
+  const m = Math.floor(sec / 60), s = Math.round(sec % 60);
+  if (m < 60) return `${m}m ${s.toString().padStart(2, "0")}s`;
+  return `${Math.floor(m / 60)}h ${(m % 60).toString().padStart(2, "0")}m`;
+}
+
+/**
+ * Manual Control Panel — the two selectors (stages, scenes), the pre-run summary
+ * the render button used to skip, and the live controls.
+ *
+ * Everything here changes the render: `skip_stages` / `skip_scenes` go on the run
+ * payload, `settings.background` is what every stage paints behind the subject,
+ * `settings.tts_voice` is what Stage 3a speaks with.
+ */
+function RunControlPanel({ proj, scenes, stages, live, busy, onRun, onChanged, act }: {
+  proj: Project; scenes: Scene[]; stages: StageSpec[]; live: Live | null; busy: string;
+  onRun: (payload: any) => void; onChanged: () => void;
+  act: (v: string, p: string, b?: any, ok?: string) => Promise<any>;
+}) {
+  const toast = useToast();
+  const settings = proj.settings || {};
+  const [skip, setSkip] = useState<string[]>(Array.isArray(settings.skip_stages) ? settings.skip_stages : []);
+  const [runOff, setRunOff] = useState<number[]>(Array.isArray(settings.run_skip_scenes) ? settings.run_skip_scenes : []);
+  const [plan, setPlan] = useState<any>(null);
+  const [confirm, setConfirm] = useState(false);
+  const [voices, setVoices] = useState<any[] | null>(null);
+  // open by default: this panel is the reason manual mode exists, and a collapsed
+  // "Manual Control Panel" is what made the user think the controls were absent
+  const [open, setOpen] = useState(true);
+  const boardOff = (scenes || []).filter((s) => s.meta?.disabled).map((s) => s.idx);
+  const sceneOff = Array.from(new Set([...boardOff, ...runOff])).sort((a, b) => a - b);
+  const key = `${proj.id}|${skip.join(",")}|${sceneOff.join(",")}`;
+
+  // The summary is a real request to the same code the scheduler uses, debounced
+  // so a fast run of clicks does not stampede the DB.
+  useEffect(() => {
+    let stop = false;
+    const t = window.setTimeout(() => {
+      api<any>(`/projects/${proj.id}/run-plan`, {
+        query: { skip_stages: skip.join(","), skip_scenes: sceneOff.join(",") },
+      }).then((p) => { if (!stop) setPlan(p); }).catch(() => { if (!stop) setPlan(null); });
+    }, 250);
+    return () => { stop = true; window.clearTimeout(t); };
+  }, [key, proj.id]);                                              // eslint-disable-line react-hooks/exhaustive-deps
+
+  const persist = async (next: Record<string, any>) => {
+    try {
+      await api(`/projects/${proj.id}`, { method: "PATCH", json: { settings: { ...settings, ...next } } });
+      onChanged();
+    } catch (e) { toast(errText(e), "err"); }
+  };
+
+  const toggleStage = (k: string) => {
+    const next = skip.includes(k) ? skip.filter((x) => x !== k) : [...skip, k];
+    setSkip(next); persist({ skip_stages: next });
+  };
+  const toggleScene = (idx: number) => {
+    if (boardOff.includes(idx)) { toast("that scene is deselected on the board — tick it there to render it", "warn"); return; }
+    const next = runOff.includes(idx) ? runOff.filter((x) => x !== idx) : [...runOff, idx];
+    setRunOff(next); persist({ run_skip_scenes: next });
+  };
+
+  const running = live?.status === "running" || live?.status === "queued" || live?.status === "paused";
+  const eta = live?.eta || null;
+  const done = (live?.stages || []).filter((r) => r.status === "done" || r.status === "skipped").length;
+  const total = (live?.stages || []).length || 1;
+
+  if ((proj.settings?.control_mode ?? "auto") !== "manual") {
+    return (
+      <Panel title="Manual Control Panel">
+        <div className="panel-b">
+          <div className="hint">
+            AUTO Director mode is choosing every stage for this project. Switch the header button to{" "}
+            <b>🎛️ MANUAL Override</b> to pick stages, deselect scenes and see the pre-run summary.
+          </div>
+        </div>
+      </Panel>
+    );
+  }
+
+  return (
+    <>
+      <Panel title="Manual Control Panel — what runs" right={
+        <span className="row" style={{ gap: 6 }}>
+          {plan ? <Badge kind={sceneOff.length || skip.length ? "warn" : "blue"}>
+            {plan.jobs}/{plan.jobs_total} jobs · {plan.scenes_rendering}/{plan.scenes_total} scenes
+          </Badge> : null}
+          <button className="btn tiny primary" disabled={!!busy} onClick={() => setConfirm(true)}
+            data-testid="open-run-summary">▶ Run this</button>
+          <button className="btn tiny" onClick={() => setOpen((o) => !o)}>{open ? "hide" : "show"}</button>
+        </span>
+      }>
+        {open && <div className="panel-b" data-testid="manual-controls">
+          <div className="mcp-cols">
+            <div>
+              <div className="mcp-h">Stages — untick to skip (rendered rows stay, the cut just stops waiting on them)</div>
+              <div className="mcp-grid">
+                {stages.map((sp) => {
+                  const core = CORE_STAGES.includes(sp.key);
+                  const off = skip.includes(sp.key);
+                  return (
+                    <label key={sp.key} className={`mcp-item ${core ? "core" : ""} ${off ? "off" : ""}`}
+                      title={core ? `${sp.title} always runs — without it there is no cut to assemble`
+                                  : `${sp.blurb || sp.title}${sp.requires_gpu ? " · GPU" : ""}`}>
+                      <input type="checkbox" checked={!off} disabled={core}
+                        data-testid={`stage-run-${sp.key}`}
+                        onChange={() => toggleStage(sp.key)} />
+                      <span>{sp.emoji} {sp.title}</span>
+                      {core ? <em className="mcp-lock">required</em> : off ? <em className="mcp-lock">skipped</em> : null}
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+            <div>
+              <div className="mcp-h">Scenes — untick to leave out of this run (captions and the cut follow)</div>
+              <div className="mcp-grid">
+                {(scenes || []).map((s) => {
+                  const off = sceneOff.includes(s.idx);
+                  const fromBoard = boardOff.includes(s.idx);
+                  return (
+                    <label key={s.idx} className={`mcp-item ${off ? "off" : ""}`}
+                      title={fromBoard ? "deselected on the storyboard board — tick it there" : (s.text || "").slice(0, 90)}>
+                      <input type="checkbox" checked={!off} data-testid={`scene-run-${s.idx}`}
+                        onChange={() => toggleScene(s.idx)} />
+                      <span>scene {s.idx + 1}</span>
+                      {fromBoard ? <em className="mcp-lock">off on board</em> : null}
+                    </label>
+                  );
+                })}
+                {!(scenes || []).length ? <div className="hint">no scenes yet — add them on the board below</div> : null}
+              </div>
+              <div className="row" style={{ gap: 6, marginTop: 8 }}>
+                <span className="hint" style={{ whiteSpace: "nowrap" }}>voice</span>
+                <select className="input" style={{ flex: 1 }} data-testid="voice-select"
+                  value={settings.tts_voice || ""}
+                  onFocus={() => { if (!voices) api<any>("/voices").then((r) => setVoices(r.tts_voices || [])).catch(() => setVoices([])); }}
+                  onChange={(e) => { persist({ tts_voice: e.target.value }); }}>
+                  <option value="">{voices === null ? "loading voices…" : "config default"}</option>
+                  {settings.tts_voice && !voices ? <option value={settings.tts_voice}>{settings.tts_voice}</option> : null}
+                  {(voices || []).map((v) => (
+                    <option key={v.id} value={v.id} disabled={v.available === false}>
+                      {v.label}{v.available === false ? " — not installed" : ""}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {voices && voices.length === 0 ? (
+                <div className="hint" style={{ fontSize: 10 }}>no TTS voices answered — `pip install edge-tts`,
+                  or use the placeholder voice only for pipeline tests</div>
+              ) : null}
+            </div>
+          </div>
+
+          {running ? (
+            <div className="mcp-live" data-testid="run-progress">
+              <Bar pct={live?.overall?.pct ?? Math.round((done / total) * 100)} />
+              <div className="row" style={{ gap: 8, marginTop: 6, flexWrap: "wrap", alignItems: "center" }}>
+                <span className="hint">{done}/{total} stages · {eta?.remaining_jobs ?? "?"} jobs left</span>
+                <b style={{ fontSize: 12 }}>
+                  {eta?.seconds ? `≈ ${fmtEta(eta.seconds)} remaining` : "measuring speed…"}
+                </b>
+                {eta?.confidence && eta.confidence !== "none" ? (
+                  <span className="hint" title={`${eta.measured_jobs} finished jobs, ${eta.avg_job_seconds}s each on average`}
+                    style={{ fontSize: 10 }}>({eta.confidence})</span>
+                ) : null}
+                {eta?.scene != null ? <span className="hint">on scene {eta.scene + 1}{eta.scene_total ? `/${eta.scene_total}` : ""}</span> : null}
+                <span className="row" style={{ gap: 4, marginLeft: "auto" }}>
+                  <button className="btn tiny" onClick={() => act("pause", `/runs/${live!.run_id}/pause`)}>⏸ pause</button>
+                  <button className="btn tiny" onClick={() => act("resume", `/runs/${live!.run_id}/resume`)}>▶ resume</button>
+                  {eta?.scene != null && live?.run_id ? (
+                    <button className="btn tiny warn" data-testid="skip-scene-live"
+                      title="stop everything this scene has not started and carry on with the rest"
+                      onClick={() => act("skip", `/runs/${live!.run_id}/skip_scene`, { scene_idx: eta.scene },
+                               `scene ${(eta.scene ?? 0) + 1} will be left out of the cut`)}>
+                      ⤳ skip scene {(eta.scene ?? 0) + 1} and continue</button>
+                  ) : null}
+                  <button className="btn tiny danger" onClick={() => act("cancel", `/runs/${live!.run_id}/cancel`, {}, "cancelled")}>■ stop</button>
+                </span>
+              </div>
+            </div>
+          ) : (
+            <div className="hint" style={{ marginTop: 8 }}>
+              {plan ? <>this run: <b>{plan.jobs}</b> of {plan.jobs_total} jobs ·{" "}
+                <b>{plan.scenes_rendering}</b> scene(s) · {plan.resolution} ·{" "}
+                {plan.captions ? "captions burned" : "no captions"} ·{" "}
+                {plan.backgrounds?.length ? plan.backgrounds.map((b: any) => `${b.label}${b.scenes > 1 ? ` ×${b.scenes}` : ""}`).join(", ") : "studio background"}{" "}
+                · ≈ {fmtEta(plan.estimated_seconds)} ({plan.estimate_basis})</>
+                : "the pre-run summary could not be read"}
+            </div>
+          )}
+          {plan?.warnings?.length ? (
+            <div className="mcp-warn" data-testid="plan-warnings">
+              {plan.warnings.map((w: string, i: number) => <div key={i}>⚠ {w}</div>)}
+            </div>
+          ) : null}
+        </div>}
+      </Panel>
+
+      {confirm && plan && (
+        <Modal title="before you press run — what will happen" onClose={() => setConfirm(false)}>
+          <div className="prerun">
+            <div className="prerun-row"><span>scenes</span><b>{plan.scenes_rendering} of {plan.scenes_total}</b>
+              {plan.scenes_skipped ? <em className="hint"> · skipped: {plan.scenes_skipped.map((i: number) => `#${i + 1}`).join(", ")}</em> : null}</div>
+            <div className="prerun-row"><span>jobs</span><b>{plan.jobs} of {plan.jobs_total}</b>
+              {plan.stages_skipped?.length ? <em className="hint"> · stages off: {plan.stages_skipped.join(", ")}</em> : null}</div>
+            <div className="prerun-row"><span>resolution</span><b>{plan.resolution}</b></div>
+            <div className="prerun-row"><span>background</span><b>
+              {plan.backgrounds?.length ? plan.backgrounds.map((b: any) => `${b.label} ×${b.scenes}`).join(", ") : "project default (studio)"}
+            </b></div>
+            <div className="prerun-row"><span>captions</span><b>{plan.captions ? "burned in" : "not burned"}</b></div>
+            <div className="prerun-row"><span>engines</span><b className="mono" style={{ fontSize: 11 }}>
+              {Object.entries(plan.engines || {}).map(([k, v]) => `${k}:${v || "—"}`).join(" · ")}</b></div>
+            <div className="prerun-row"><span>estimated time</span><b>≈ {fmtEta(plan.estimated_seconds)}</b>
+              <em className="hint"> {plan.estimate_basis}</em></div>
+            {plan.estimated_size_bytes ? (
+              <div className="prerun-row"><span>estimated size</span><b>{fmtSize(plan.estimated_size_bytes)}</b></div>
+            ) : null}
+            {plan.warnings?.length ? (
+              <div className="mcp-warn" style={{ marginTop: 8 }}>
+                {plan.warnings.map((w: string, i: number) => <div key={i}>⚠ {w}</div>)}
+              </div>
+            ) : null}
+            <div className="spread" style={{ marginTop: 12 }}>
+              <button className="btn" onClick={() => setConfirm(false)}>back to editing</button>
+              <button className="btn primary" data-testid="confirm-run" disabled={!!busy}
+                onClick={() => { setConfirm(false); onRun({ skip_stages: skip, skip_scenes: sceneOff }); }}>
+                ▶ Run now ({plan.jobs} jobs)
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </>
+  );
+}
+
+/** Project-wide background. Per-scene overrides live on the storyboard rows. */
+function BackgroundPanel({ proj, scenes, onChanged, act, busy }: {
+  proj: Project; scenes: Scene[]; onChanged: () => void;
+  act: (v: string, p: string, b?: any, ok?: string) => Promise<any>; busy: string;
+}) {
+  const settings = proj.settings || {};
+  const [bg, setBg] = useState<Bg>(settings.background || null);
+  const [saved, setSaved] = useState<Bg>(settings.background || null);
+  useEffect(() => { setBg(settings.background || null); setSaved(settings.background || null); },
+    [JSON.stringify(settings.background || null)]);      // eslint-disable-line react-hooks/exhaustive-deps
+  const dirty = JSON.stringify(bg) !== JSON.stringify(saved);
+  const overrides = (scenes || []).filter((s) => (s.meta || {}).background);
+
+  const save = async () => {
+    const r = await act("background", `/projects/${proj.id}`, { settings: { ...settings, background: bg } },
+                        "background saved — it renders on the next clip");
+    if (r !== null) { setSaved(bg); onChanged(); }
+  };
+
+  return (
+    <Panel title="Background & Style" right={
+      <span className="row" style={{ gap: 6 }}>
+        {dirty ? <Badge kind="warn">unsaved</Badge> : null}
+        <button className="btn tiny primary" disabled={!dirty || !!busy} onClick={save}
+          data-testid="bg-save">{busy === "background" ? "saving…" : "save background"}</button>
+      </span>
+    }>
+      <div className="panel-b">
+        <BackgroundPicker projectId={proj.id} value={bg} onChange={setBg} />
+        {overrides.length ? (
+          <div className="hint" style={{ marginTop: 6 }}>
+            {overrides.length} scene(s) override this with their own background:{" "}
+            {overrides.map((s) => `#${s.idx + 1}`).join(", ")} — clear them from the row's 🎨 button
+          </div>
+        ) : null}
+      </div>
+    </Panel>
   );
 }

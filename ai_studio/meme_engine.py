@@ -117,8 +117,14 @@ def decide_meme_usage(content_type: str, topic: str, mood: str,
 
 def render_meme_clip(meme_type: str, headline: str, out_mp4: str,
                      duration: float = 2.0, width: int = 720, height: int = 1280,
-                     fps: int = 25, punch_in: bool = True, freeze: bool = False) -> str:
-    """Render a dynamic meme reaction clip with camera punch-in and visual impact."""
+                     fps: int = 25, punch_in: bool = True, freeze: bool = False,
+                     background: dict | None = None) -> str:
+    """Render a dynamic meme reaction clip with camera punch-in and visual impact.
+
+    ``background``: a resolved ai_studio.backgrounds plate to put behind the
+    reaction. The rays and the headline banner re-tint from the plate, so a white
+    studio still reads as a meme and not as a blown-out accident.
+    """
     m_info = REACTION_PRESETS.get(meme_type, REACTION_PRESETS["reaction_shock"])
     dur = max(0.5, float(duration))
     num_frames = int(round(dur * fps))
@@ -133,6 +139,13 @@ def render_meme_clip(meme_type: str, headline: str, out_mp4: str,
     # Base graphic
     base = np.zeros((height, width, 3), dtype=np.uint8)
     base[:, :] = bg_color
+    plate = None
+    if background:
+        from . import backgrounds as _bg
+        plate = _bg.plate(background, width=width, height=height)
+    if plate is not None:
+        base = plate.copy()
+        bg_color = tuple(int(round(c)) for c in base.reshape(-1, 3).mean(axis=0))
 
     # Concentric radial energy rays
     cx, cy = width // 2, int(height * 0.48)

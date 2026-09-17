@@ -23,7 +23,7 @@ from .. import khmer
 
 class RunContext:
     def __init__(self, db, cfg, plan, project, run, bus=None, data_root="", cancel=None,
-                 resume_from="", force_stages=()):
+                 resume_from="", force_stages=(), skip_scenes=(), skip_stages=()):
         self.db = db
         self.cfg = cfg
         self.plan = plan or {}
@@ -34,7 +34,13 @@ class RunContext:
         self.cancel = cancel
         self.resume_from = resume_from
         self.force_stages = tuple(force_stages or ())
+        # Manual Control Panel selections. `skip_scenes` is this run only (the
+        # checkboxes next to the scene rows); a scene's own `meta.disabled` is the
+        # permanent version of the same idea, set from the board.
+        self.skip_scenes = set(int(i) for i in (skip_scenes or ()))
+        self.skip_stages = tuple(skip_stages or ())
         self._scenes = None
+        self._bg_plates = {}
 
     # ------------------------------------------------------------- identities
     @property
@@ -79,6 +85,70 @@ class RunContext:
             return "/" + os.path.relpath(path, self.data_root).replace(os.sep, "/")
         except Exception:
             return "/" + os.path.basename(path)
+
+    # ------------------------------------------------------- scene gating + plates
+    def scene_included(self, idx):
+        """False when the Director deselected this scene for the run.
+
+        One rule, used by every per-scene stage *and* assembly, because a scene
+        that renders but never reaches the cut (or the reverse) is the kind of bug
+        that makes a manual mode untrustworthy.
+        """
+        idx = int(idx)
+        if idx in self.skip_scenes:
+            return False
+        for s in (self.db.list_scenes(self.project_id) or []):
+            if int(s.get("idx", -1)) == idx:
+                return not bool((s.get("meta") or {}).get("disabled"))
+        return True
+
+    def skip_note(self, idx):
+        if int(idx) in self.skip_scenes:
+            return "deselected for this run in the Manual Control Panel"
+        return "disabled on the scene board (meta.disabled)"
+
+    def background_for(self, scene, *, progress=None):
+        """The resolved plate for one scene, or ``None`` for "no choice made".
+
+        Precedence: the scene's own ``meta.background`` (the board's Background
+        column) then the project's ``settings.background`` (the global choice). An
+        ``ai_prompt`` plate is generated once per prompt per project and cached on
+        disk, so fifteen scenes sharing a prompt cost one render.
+
+        Returns ``(resolved_or_None, notes)``; a background the renderers cannot
+        use yields a note that says what to do instead of a silent fallback.
+        """
+        from .. import backgrounds as bg_mod
+
+        meta = scene.get("meta") or {} if isinstance(scene, dict) else {}
+        raw = meta.get("background") or (self.project.get("settings") or {}).get("background")
+        b = bg_mod.normalize(raw)
+        if not b:
+            return None, []
+        ok, val = bg_mod.validate(b)
+        if not ok:
+            return None, [f"background ignored: {val}"]
+        v = self.cfg.get("video", {}) or {}
+        res = bg_mod.resolve(val, width=int(v.get("width", 480)), height=int(v.get("height", 854)),
+                            data_root=self.data_root, seed=0,
+                            project_dir=self.project_dir())
+        if not res:
+            return None, []
+        if res["kind"] == "ai":
+            ck = res.get("key")
+            if ck in self._bg_plates:
+                cached = self._bg_plates[ck]
+                if cached and cached.get("path") and os.path.exists(cached["path"]):
+                    return dict(cached), []
+            ok2, note = bg_mod.ensure_ai_plate(res, cfg=self.cfg, progress=progress)
+            if not ok2:
+                return None, [note]
+            self._bg_plates[res.get("key")] = dict(res)
+            return dict(res), [note]
+        if res["kind"] == "missing":
+            return None, [f"background plate not found ({os.path.basename(res.get('path') or '?')}) "
+                          f"— re-upload it in the Background selector, or pick a 📦 Template"]
+        return res, []
 
     # ------------------------------------------------------------------ assets
     def register_asset(self, kind, path, stage="", scene_idx=-1, meta=None, duration=None):
