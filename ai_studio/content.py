@@ -306,6 +306,21 @@ CONTENT_TYPES = {
 
 DEFAULT_CONTENT_TYPE = "explainer"
 VALID_CONTENT_TYPES = tuple(CONTENT_TYPES)
+
+# ------------------------------------------- scene board vocabulary (one source)
+# The board's pickers, the save endpoint and Stage 4 have to agree on these words,
+# and the save has to enforce them for real. It used to whitelist three of the six
+# values below, compute a fallback into a local it then threw away (so any string
+# at all was stored), and filter `meta` down to four keys — which deleted the
+# knobs that ARE valid: character_action, prop, emotion_style, meme_type.
+VISUAL_SOURCES = ("character_action", "character_demo", "illustration", "meme",
+                  "meme_reaction", "generated_video")
+RENDER_MODES = ("broll", "talking_head")
+# The rule that goes with them: nothing filters `scene.meta`, on the way in or on
+# the way out. The board is the Director's document, and a run must not re-cut it:
+# `pipeline.max_scenes` caps what the auto segmenter may invent, it never deletes
+# narration someone typed by hand.
+
 EXPRESSION_SUGGESTIONS = [
     "neutral", "happy", "sad", "determined", "surprised", "calm", "curious",
     "proud", "thoughtful", "excited", "worried", "grateful",

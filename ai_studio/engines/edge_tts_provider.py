@@ -16,6 +16,52 @@ class EdgeTTSProvider:
         "male": "km-KH-PisethNeural",
         "female": "km-KH-SreymomNeural"
     }
+    # The studio's voice picker sends any of these; resolving them here keeps the
+    # id in settings readable (`"sreymom"` survives a rename of the short name).
+    VOICE_ALIASES = {
+        "piseth": "km-KH-PisethNeural", "male": "km-KH-PisethNeural",
+        "sreymom": "km-KH-SreymomNeural", "female": "km-KH-SreymomNeural",
+        "km-kh-pisethneural": "km-KH-PisethNeural",
+        "km-kh-sreymomneural": "km-KH-SreymomNeural",
+    }
+
+    @classmethod
+    def resolve_voice(cls, voice=None, gender=None):
+        """`"sreymom"` / `"female"` / `"km-KH-SreymomNeural"` → the short name."""
+        for cand in (voice, gender):
+            key = str(cand or "").strip().lower()
+            if not key:
+                continue
+            if key in cls.VOICE_ALIASES:
+                return cls.VOICE_ALIASES[key]
+            if key.startswith("km-") or "-" in key:
+                return str(cand).strip()
+        return cls.VOICES.get(str(gender or "male"), cls.VOICES["male"])
+
+    @classmethod
+    def catalog(cls, available=None):
+        """What the Voices tab lists under "TTS voices" — ids the studio accepts.
+
+        `available` (from :func:`ai_studio.engines.tts.available_engines`) decides
+        whether the row is selectable or carries the fix-it note, so a machine
+        without the package shows the reason instead of a silent fallback.
+        """
+        out = []
+        for label, short, gender in (("Piseth", "km-KH-PisethNeural", "male"),
+                                     ("Sreymom", "km-KH-SreymomNeural", "female")):
+            out.append({
+                "id": f"edge_tts:{short}",
+                "label": f"⚡ Edge-TTS {label} ({'Male' if gender == 'male' else 'Female'})",
+                "provider": "edge_tts", "voice": short, "gender": gender,
+                "engine": "edge_tts",
+                "emotions": sorted(cls.EMOTION_PROFILES),
+                "needs_network": True,
+                "available": True if available is None else bool(available.get("edge_tts")),
+                "note": ("Microsoft neural voice — needs internet on the first call"
+                         if available is None or available.get("edge_tts") else
+                         "pip install edge-tts (requirements-studio.txt) to enable"),
+            })
+        return out
 
     EMOTION_PROFILES = {
         "happy": {"rate": "+10%", "pitch": "+2Hz"},
@@ -52,12 +98,14 @@ class EdgeTTSProvider:
                 if chunk["type"] == "audio":
                     audio_data += chunk["data"]
             if audio_data and len(audio_data) > 200:
-                return audio_data
+                return audio_data, True
         except Exception:
-            # When offline, sandboxed, or Microsoft endpoints blocked, use acoustic speech generator
-            return self._generate_offline_speech_mp3(text, voice, emotion)
+            # Offline, sandboxed, or Microsoft blocked: synthesise locally so the
+            # pipeline still has audio to time against — but the caller is told
+            # this is NOT the neural voice (see synthesize_to_file).
+            return self._generate_offline_speech_mp3(text, voice, emotion), False
 
-        return self._generate_offline_speech_mp3(text, voice, emotion)
+        return self._generate_offline_speech_mp3(text, voice, emotion), False
 
     def _generate_offline_speech_mp3(self, text: str, voice: str, emotion: str = "neutral") -> bytes:
         """High-resolution vocal formant synthesis for offline / CI environments."""
@@ -101,13 +149,22 @@ class EdgeTTSProvider:
         except Exception:
             return pcm
 
-    def synthesize(self, text: str, gender: str = "male", emotion: str = "neutral") -> bytes:
-        voice = self.VOICES.get(gender, self.VOICES["male"])
-        return asyncio.run(self._synthesize_async(text, voice, emotion))
+    def synthesize(self, text: str, gender: str = "male", emotion: str = "neutral",
+                   voice: str = None) -> bytes:
+        data, _real = self.synthesize_audio(text, gender=gender, emotion=emotion, voice=voice)
+        return data
 
-    def synthesize_to_file(self, text: str, out_path: str, gender: str = "male", emotion: str = "neutral") -> dict:
-        voice = self.VOICES.get(gender, self.VOICES["male"])
-        data = self.synthesize(text, gender=gender, emotion=emotion)
+    def synthesize_audio(self, text: str, gender: str = "male", emotion: str = "neutral",
+                         voice: str = None):
+        """(mp3 bytes, from_network). The flag matters: a local stand-in is fine
+        for timing previews but must never be sold as the neural voice."""
+        v = self.resolve_voice(voice, gender)
+        return asyncio.run(self._synthesize_async(text, v, emotion))
+
+    def synthesize_to_file(self, text: str, out_path: str, gender: str = "male",
+                           emotion: str = "neutral", voice: str = None) -> dict:
+        voice = self.resolve_voice(voice, gender)
+        data, from_network = self.synthesize_audio(text, gender=gender, emotion=emotion, voice=voice)
         if not data:
             return {"ok": False, "reason": "Edge-TTS produced empty audio"}
 
@@ -142,10 +199,18 @@ class EdgeTTSProvider:
 
         return {
             "ok": True,
-            "engine": f"edge-tts ({voice})",
+            # An honest engine label: QA, the run log and the scene card all quote
+            # this back, so it has to distinguish neural speech from the stand-in.
+            "engine": (f"edge-tts ({voice})" if from_network
+                       else f"edge-tts-local-stand-in ({voice})"),
             "provider": "edge_tts",
             "voice": voice,
-            "real_speech": True,
+            "real_speech": bool(from_network),
+            "network": bool(from_network),
             "duration": dur,
             "path": out_path,
+            **({} if from_network else {
+                "reason": "Microsoft's edge-tts endpoint was unreachable, so this audio was "
+                          "generated locally — the words and timing are real, the voice is not. "
+                          "Check your internet connection and run the stage again."}),
         }

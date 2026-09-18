@@ -68,7 +68,12 @@ DEFAULTS = {
         },
     },
     "tts": {                                        # Stage 3a
-        "engine": "auto",                           # auto | sherpa | piper | kokoro | placeholder
+        "engine": "auto",                           # auto | edge_tts | sherpa | piper | kokoro | placeholder
+        # The voice the studio speaks with. "" keeps the engine's own default
+        # (edge-tts → Piseth); the Voices tab writes a short name here, and
+        # `tts_providers` reads it — a picker that writes nothing is a lie.
+        "voice": "",
+        "gender": "male",                           # edge-tts fallback when voice is empty
         "model_dir": "models/tts/vits-mms-khm",     # sherpa-onnx VITS dir (model.onnx + tokens.txt)
         "sherpa_cli": "",                           # path to sherpa-onnx-offline-tts (optional)
         "language": "km",

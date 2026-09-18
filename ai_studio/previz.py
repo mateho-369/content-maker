@@ -17,6 +17,7 @@ import os
 import subprocess
 
 from .util import ensure_dir, ffmpeg_exe
+from . import backgrounds as _bg
 
 # sky_top, sky_mid, horizon, sun, hills[3], water, mist_alpha, particle, particle_colour
 PALETTES = {
@@ -104,8 +105,15 @@ def _ridge(rng, width, base_y, amp, roughness=0.06):
 
 
 def render_clip(dst, duration=6.0, width=480, height=854, fps=16, mood_tag="", visual_prompt="",
-                seed=0, motion=0.75, progress=None):
-    """Render one previz clip. Returns {path, duration, width, height, fps, engine}."""
+                seed=0, motion=0.75, progress=None, background=None):
+    """Render one previz clip. Returns {path, duration, width, height, fps, engine}.
+
+    ``background``: a resolved :mod:`ai_studio.backgrounds` plate (or any stored
+    background spec). When it is set it *replaces* the procedural environment —
+    sky, water and hills all come from the Director's choice, while particles and
+    the lens vignette stay, because a scene with no atmosphere at all reads as a
+    broken render.
+    """
     import numpy as np
 
     ensure_dir(os.path.dirname(dst) or ".")
@@ -161,15 +169,30 @@ def render_clip(dst, duration=6.0, width=480, height=854, fps=16, mood_tag="", v
     for mask, col, _s in layers:
         img[mask] = col
 
+    # The Director's plate replaces everything above (sky, sun, hills) — hence the
+    # override sitting here rather than at the top of the base build.
+    bg_res = _resolve_plate(background, W, H, seed)
+    plate = None if bg_res is None else _bg.plate(bg_res, width=W, height=H)
+    if plate is not None:
+        img = plate.astype(np.float32)
+        horizon_y, water_h = H, 2            # no water line under a plate → ripples skip
+        mist_a = mist_a if bg_res.get("kind") == "template" else 0.0
+
     px = rng.uniform(0, W, PARTICLE_COUNTS.get(ptype, 20)).astype(np.float32)
     py = rng.uniform(0, H, PARTICLE_COUNTS.get(ptype, 20)).astype(np.float32)
     pv = rng.uniform(0.10, 0.85, PARTICLE_COUNTS.get(ptype, 20)).astype(np.float32)
     psz = rng.uniform(1.1, 3.2, PARTICLE_COUNTS.get(ptype, 20)).astype(np.float32)
     pph = rng.uniform(0, 6.28, PARTICLE_COUNTS.get(ptype, 20)).astype(np.float32)
     pcol3 = np.array(pcol, dtype=np.float32)
+    if plate is not None and float(plate.mean()) > 168.0:
+        pcol3 = np.array([76.0, 84.0, 98.0], dtype=np.float32)   # dark motes: bright dust on a
+                                                                  # white cyc is invisible
 
     vig = (1.0 - 0.28 * (((xx - W / 2) / (W / 2)) ** 2 + ((yy - H / 2) / (H / 2)) ** 2))
-    vig = np.clip(vig, 0.62, 1.0)[..., None]
+    # A plate carries its own lighting (the studio key, the city haze). previz's
+    # landscape falloff on top of it crushed white-cyc corners to ~55% and made a
+    # clean studio read as a dirty lens, so an explicit plate keeps only a hint.
+    vig = np.clip(vig, 0.90 if plate is not None else 0.62, 1.0)[..., None]
     img *= vig
     img_reflect = img[horizon_y:][::-1].copy() * 0.16   # faint reflection: water stays deep
 
@@ -262,7 +285,30 @@ def render_clip(dst, duration=6.0, width=480, height=854, fps=16, mood_tag="", v
         raise RuntimeError(f"previz encode failed: {err[-400:] or 'no frames written'}")
     return {"path": dst, "duration": round(written / float(fps), 3), "width": width,
             "height": height, "fps": fps, "frames": written, "engine": "previz",
-            "mood": mood_tag or "calm-warm"}
+            "mood": mood_tag or "calm-warm",
+            "background": (bg_res or {}).get("key", "") if bg_res else "",
+            "background_label": _bg.label(background) if background else ""}
+
+
+def _resolve_plate(background, W, H, seed):
+    """The background to paint at this render size, or None for 'no choice made'.
+
+    Accepts an already-resolved plate dict (what the pipeline passes, since only
+    the pipeline knows the data/project dirs an image or AI plate lives in) or a
+    raw stored spec. A plate that cannot be read is dropped here and reported by
+    the stage that asked for it — never replaced by a silent default.
+    """
+    if not background:
+        return None
+    if isinstance(background, dict) and background.get("kind"):
+        if background.get("kind") in ("missing", "ai"):
+            return None
+        return dict(background, w=int(W), h=int(H))
+    try:
+        res = _bg.resolve(background, width=int(W), height=int(H), seed=int(seed or 0))
+    except Exception:
+        return None
+    return None if not res or res.get("kind") in ("missing", "ai") else res
 
 
 def _crop_resample(frame, dx, t, width, height):

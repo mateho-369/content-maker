@@ -113,6 +113,37 @@ def scene_meta(scene):
     return scene.get("meta") or {}
 
 
+def _scene_gate(ctx, idx, label="scene"):
+    """Terminal-ok skip for a scene the Director did not select for this run.
+
+    ``ok=True`` on purpose: the run has to settle, and assembly drops the same
+    scenes by the same rule — so "not selected" must never read as a failure and
+    must never leave the scene in the cut either.
+    """
+    if ctx.scene_included(idx):
+        return None
+    note = ctx.skip_note(idx)
+    return {"ok": True, "status": "skipped", "engine": "not selected", "progress": 100.0,
+            "message": f"{label} {int(idx) + 1} {note}",
+            "notes": [f"{label} {int(idx) + 1}: left out of this run — {note}. Re-tick it and "
+                      f"press Run again to bring it back."]}
+
+
+def _scene_background(ctx, scene, idx):
+    """(plate, notes) for one scene: the board's override, else the project's choice.
+
+    Resolution lives here rather than in the renderers because only the pipeline
+    knows the data dir, the project dir an AI plate caches into, and the engine
+    config it needs.
+    """
+    try:
+        return ctx.background_for(scene)
+    except Exception as e:                       # a broken plate must never kill a run
+        return None, [f"background for scene {int(idx) + 1} could not be prepared "
+                      f"({type(e).__name__}: {str(e)[:120]}) — pick another one"]
+
+
+
 def _content_type(ctx):
     from .. import content as content_mod
     return content_mod.normalize(ctx.project.get("content_type") or "explainer")
@@ -255,6 +286,14 @@ async def stage_breakdown(ctx, _idx):
     if not scenes:
         return {"ok": False, "error": "segmentation produced no scenes"}
     limit = int(ctx.cfg["pipeline"].get("max_scenes", 12))
+    # `max_scenes` caps what the *auto* segmenter may invent; it has never been a
+    # licence to delete the Director's rows. A manual board of 15 scenes used to be
+    # cut to 3 here, and the run answered with 12 scenes of narration gone (the
+    # "unsaved board" complaint in its worst form). The stored board wins.
+    trimmed = 0
+    if board and len(scenes) > limit:
+        limit = max(limit, len(board))
+        trimmed = max(0, len(scenes) - len(board))
     scenes = scenes[:limit]
     scenes = _tag_sides(scenes, ctx)
     for i, s in enumerate(scenes):
@@ -286,6 +325,10 @@ async def stage_breakdown(ctx, _idx):
                                            "estimated_duration_sec")} for sc in scenes])[:4000])
     est = round(sum(float(s.get("estimated_duration_sec") or 0) for s in scenes), 1)
     notes = list(meta.get("notes") or [])
+    if trimmed:
+        notes.append(f"segmenter proposed {trimmed + len(scenes)} scene(s); kept the "
+                     f"{len(scenes)} the board already had (pipeline.max_scenes={limit} never "
+                     f"deletes your rows)")
     integrity = meta.get("integrity") or {}
     if integrity.get("ok") is False:
         notes.append("⚠️ scene text did not match the Director's script exactly")
@@ -302,9 +345,13 @@ async def stage_breakdown(ctx, _idx):
 
 # ------------------------------------------------------------------ 3a · voice
 async def stage_voice_base(ctx, idx):
+    _skip = _scene_gate(ctx, idx)
+    if _skip:
+        return _skip
     scene = ctx.db.get_scene(ctx.project_id, idx)
     if not scene or not (scene.get("text") or "").strip():
-        return {"ok": False, "error": f"scene {idx} has no text"}
+        return {"ok": False, "error": f"scene {idx} has no text — fill it in on the board or "
+                                      "remove the row with ✕"}
     from ..engines import tts
 
     m = scene_meta(scene)
@@ -320,7 +367,8 @@ async def stage_voice_base(ctx, idx):
                                   ctx.progress_cb("voice_base", idx, 5, 92, "synthesising · "),
                                   idx + _run_seed(ctx),
                                   emotion_style=emotion,
-                                  provider_name=provider)
+                                  provider_name=provider,
+                                  voice=(ctx.project.get("settings") or {}).get("tts_voice") or None)
     if not res.get("ok"):
         return {"ok": False, "error": f"voice synthesis failed: {res.get('reason')}",
                 "engine": engine}
@@ -344,6 +392,9 @@ async def stage_voice_base(ctx, idx):
 
 # ------------------------------------------------------------------ 3b · timbre
 async def stage_voice_final(ctx, idx):
+    _skip = _scene_gate(ctx, idx)
+    if _skip:
+        return _skip
     scene = ctx.db.get_scene(ctx.project_id, idx)
     base = ctx.latest_asset("voice", scene_idx=idx)
     if not base:
@@ -426,6 +477,7 @@ async def stage_video(ctx, idx):
     visual_source = _scene_visual_source(scene, ctx)
     render_mode = _scene_render_mode(scene, ctx)
     character_image, character = _scene_character_image(ctx, scene)
+    bg_plate, bg_notes = _scene_background(ctx, scene, idx)
 
     if visual_source == "character_demo" and not _character_id(scene, ctx):
         return {"ok": False, "error": "visual_source 'character_demo' needs a character_id — "
@@ -463,8 +515,11 @@ async def stage_video(ctx, idx):
         w = int(ctx.project.get("settings", {}).get("width") or 720)
         h = int(ctx.project.get("settings", {}).get("height") or 1280)
         fps = int(ctx.project.get("settings", {}).get("fps") or 25)
-        await asyncio.to_thread(ca.render_character_action_clip, char_img, action_name, out, target, w, h, fps, prop)
-        return _video_result(ctx, idx, out, {"ok": True, "engine": f"character-action-{action_name}", "duration": target, "width": w, "height": h, "fps": fps}, "character_action", target)
+        await asyncio.to_thread(ca.render_character_action_clip, char_img, action_name, out, target,
+                                w, h, fps, prop, background=bg_plate)
+        return _video_result(ctx, idx, out, {"ok": True, "engine": f"character-action-{action_name}",
+                                             "duration": target, "width": w, "height": h, "fps": fps},
+                             "character_action", target, bg_notes)
 
     # reaction meme clip
     if visual_source in ("meme", "meme_reaction"):
@@ -479,8 +534,11 @@ async def stage_video(ctx, idx):
         w = int(ctx.project.get("settings", {}).get("width") or 720)
         h = int(ctx.project.get("settings", {}).get("height") or 1280)
         fps = int(ctx.project.get("settings", {}).get("fps") or 25)
-        await asyncio.to_thread(me.render_meme_clip, m_type, headline, out, target, w, h, fps)
-        return _video_result(ctx, idx, out, {"ok": True, "engine": f"meme-{m_type}", "duration": target, "width": w, "height": h, "fps": fps}, "meme", target)
+        await asyncio.to_thread(me.render_meme_clip, m_type, headline, out, target, w, h, fps,
+                                background=bg_plate)
+        return _video_result(ctx, idx, out, {"ok": True, "engine": f"meme-{m_type}", "duration": target,
+                                             "width": w, "height": h, "fps": fps},
+                             "meme", target, bg_notes)
 
     # still-image source: Director's upload wins, then a generated illustration.
     still = None
@@ -517,8 +575,9 @@ async def stage_video(ctx, idx):
                                           ctx.plan, target,
                                           ctx.progress_cb("video", idx, 3, 96, "kenburns · "),
                                           idx + _run_seed(ctx), None, still,
-                                          bool(character))
+                                          bool(character), background=bg_plate)
             if res.get("ok"):
+                return _video_result(ctx, idx, out, res, engine, target, bg_notes)
                 return _video_result(ctx, idx, out, res, engine, target)
             return {"ok": False, "error": f"illustration clip failed: {str(res.get('reason'))[:200]}",
                     "engine": engine}
@@ -533,11 +592,11 @@ async def stage_video(ctx, idx):
         ctx.cfg["video"].get("seed") or 0)
     res = await asyncio.to_thread(video_engine.render_scene_clip, scene, out, ctx.cfg, ctx.plan,
                                   target, ctx.progress_cb("video", idx, 3, 96, f"{engine} · "),
-                                  seed, reference, None, bool(character))
-    return _video_result(ctx, idx, out, res, engine, target)
+                                  seed, reference, None, bool(character), background=bg_plate)
+    return _video_result(ctx, idx, out, res, engine, target, bg_notes)
 
 
-def _video_result(ctx, idx, out, res, engine, target):
+def _video_result(ctx, idx, out, res, engine, target, bg_notes=()):
     if not res.get("ok"):
         return {"ok": False, "error": f"video render failed: {str(res.get('reason'))[:240]}",
                 "engine": engine}
@@ -554,13 +613,17 @@ def _video_result(ctx, idx, out, res, engine, target):
     meta["prompt"] = res.get("prompt", "")
     if res.get("prompt_id"):
         meta["comfy_prompt_id"] = res["prompt_id"]
+    notes = list(bg_notes or []) + list(res.get("vram_notes") or [])
+    if res.get("fallback_reason"):
+        notes.append(res.get("fallback_reason"))
+    if res.get("background"):
+        meta["background"] = res["background"]
     return {"ok": True, "engine": res.get("engine") or engine, "progress": 100.0,
             "message": f"{res.get('duration', 0):.2f}s clip · {res.get('engine')}"
                        + (f" · {len(res.get('vram_notes') or [])} VRAM adjust" if res.get("vram_notes") else ""),
             "assets": [{"kind": "video", "path": out, "scene_idx": idx,
                         "duration": res.get("duration", 0), "meta": meta}],
-            "notes": (res.get("vram_notes") or []) + ([res.get("fallback_reason")]
-                                                      if res.get("fallback_reason") else [])}
+            "notes": notes}
 
 
 def _project_reference_image(ctx):
@@ -576,6 +639,9 @@ def _project_reference_image(ctx):
 
 # --------------------------------------------------------- 3c · talking head
 async def stage_talking_head(ctx, idx):
+    _skip = _scene_gate(ctx, idx)
+    if _skip:
+        return _skip
     scene = ctx.db.get_scene(ctx.project_id, idx)
     if not scene:
         return {"ok": False, "error": f"scene {idx} missing"}
@@ -600,6 +666,24 @@ async def stage_talking_head(ctx, idx):
     from ..engines import talking_head as th_engine
 
     out = ctx.asset_path("talking_head", idx, ".mp4")
+    # The Director's backdrop applies to a talking-head shot too: the portrait is
+    # matted onto the plate first (same composite the illustration path uses),
+    # because `talking_head.render` has no background argument of its own. A frame
+    # where that fails still renders on the character image — a lost backdrop beats
+    # a failed scene.
+    bg_plate, bg_notes = _scene_background(ctx, scene, idx)
+    if bg_plate is not None:
+        try:
+            from ..engines.video import _matte_on_plate
+
+            v = ctx.cfg.get("video", {}) or {}
+            laid = os.path.join(os.path.dirname(out) or ".", ".head_on_plate.png")
+            _matte_on_plate(image, bg_plate, laid, int(v.get("width") or 480),
+                            int(v.get("height") or 854))
+            if os.path.exists(laid) and os.path.getsize(laid) > 512:
+                image = laid
+        except Exception as e:
+            bg_notes = list(bg_notes) + [f"talking head kept the plain portrait ({type(e).__name__})"]
     res = await asyncio.to_thread(
         th_engine.render, image, voice["path"], out, ctx.cfg,
         ctx.progress_cb("talking_head", idx, 3, 95, "talking head · "))
@@ -615,6 +699,10 @@ async def stage_talking_head(ctx, idx):
     meta = {k: v for k, v in res.items() if k not in ("ok", "path")}
     meta["character"] = (char or {}).get("name", "")
     meta["expression_image"] = os.path.basename(image)
+    if bg_plate:
+        meta["background"] = (bg_plate or {}).get("key") or "plate"
+    if bg_notes:
+        meta["notes"] = list(meta.get("notes") or []) + list(bg_notes)
     meta["render_mode"] = "talking_head"
     return {"ok": True, "engine": res.get("engine") or "talking_head", "progress": 100.0,
             "message": f"{res.get('duration', 0):.2f}s talking head · {res.get('engine')}",
@@ -625,6 +713,9 @@ async def stage_talking_head(ctx, idx):
 
 # ----------------------------------------------------------------- 4b · duration match
 async def stage_video_fit(ctx, idx):
+    _skip = _scene_gate(ctx, idx)
+    if _skip:
+        return _skip
     scene = ctx.db.get_scene(ctx.project_id, idx)
     video = ctx.latest_asset("video", scene_idx=idx) or \
         ctx.latest_asset("talking_head", scene_idx=idx)
@@ -676,6 +767,9 @@ def _dur(path):
 
 # ----------------------------------------------------------------------- 5 · sfx
 async def stage_sfx(ctx, idx):
+    _skip = _scene_gate(ctx, idx)
+    if _skip:
+        return _skip
     scene = ctx.db.get_scene(ctx.project_id, idx)
     plan_sfx = ctx.plan.get("sfx") or {}
     engine = plan_sfx.get("engine", "procedural")
@@ -719,6 +813,9 @@ async def stage_sfx(ctx, idx):
 
 # ----------------------------------------------------------------------- 6 · QA
 async def stage_qa(ctx, idx):
+    _skip = _scene_gate(ctx, idx)
+    if _skip:
+        return _skip
     scene = ctx.db.get_scene(ctx.project_id, idx)
     if not scene:
         return {"ok": False, "error": f"scene {idx} missing"}
@@ -792,9 +889,17 @@ async def stage_qa(ctx, idx):
 
 # --------------------------------------------------------------------- 7 · assembly
 async def stage_assemble(ctx, _idx):
-    scenes = ctx.db.list_scenes(ctx.project_id)
+    all_scenes = ctx.db.list_scenes(ctx.project_id)
+    if not all_scenes:
+        return {"ok": False, "error": "no scenes to assemble — add a scene (\"+ add scene\") or "
+                                      "paste a script (\"⤓ import script\") first"}
+    # The cut follows the Director's selection: a scene unticked for this run is
+    # absent here exactly as it is absent from every stage above it.
+    scenes = [sc for sc in all_scenes if ctx.scene_included(sc["idx"])]
+    dropped = len(all_scenes) - len(scenes)
     if not scenes:
-        return {"ok": False, "error": "no scenes to assemble"}
+        return {"ok": False, "error": "every scene is deselected for this run — tick at least one "
+                                      "back in the Manual Control Panel"}
     stage_assets = {}
     for kind in ("voice", "voice_final", "video", "talking_head", "video_fit", "ambient", "qa"):
         stage_assets[kind] = {}
@@ -804,6 +909,9 @@ async def stage_assemble(ctx, _idx):
                 stage_assets[kind][s["idx"]] = {"path": a["path"], "duration": a["duration"],
                                                "engine": (a.get("meta") or {}).get("engine"),
                                                "meta": a.get("meta") or {}}
+    if dropped:
+        ctx.event("assembly_scenes_dropped", {"dropped": dropped, "kept": len(scenes)})
+
     from ..engines import assembly
 
     out_dir = ctx.final_dir()

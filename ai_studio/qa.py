@@ -168,51 +168,160 @@ def validate_voice_audio(audio_path: str) -> Dict:
     }
 
 
-def validate_final_mp4(mp4_path: str, target_aspect: Tuple[int, int] = (9, 16)) -> Dict:
-    """Inspects final exported MP4 container, streams, resolution, and playback safety."""
-    if not mp4_path or not os.path.exists(mp4_path):
-        return {"passed": False, "issues": [{"severity": "fail", "check": "mp4", "issue": f"Final MP4 file does not exist: {mp4_path}"}]}
+def final_dimensions(settings: Optional[dict]) -> Optional[Tuple[int, int]]:
+    """The resolution this project's export is supposed to have.
 
-    if os.path.getsize(mp4_path) < 10240:
-        return {"passed": False, "issues": [{"severity": "fail", "check": "mp4", "issue": f"Final MP4 is corrupted or too small ({os.path.getsize(mp4_path)} bytes)"}]}
+    The per-project `settings.video` block is what the assembly stage renders at,
+    so that is what the gate compares against — a hardcoded 9:16 would flag every
+    landscape export and stay silent about a 1080p project that came out 540p.
+    None means "no expectation on record, do not judge".
+    """
+    v = ((settings or {}).get("video") or {})
+    try:
+        w, h = int(v.get("width") or 0), int(v.get("height") or 0)
+    except (TypeError, ValueError):
+        return None
+    return (w, h) if w > 0 and h > 0 else None
 
-    issues = []
+
+def validate_final_mp4(mp4_path: str, expect: Optional[Tuple[int, int]] = None) -> Dict:
+    """Open the finished export and report what is in the container.
+
+    Size and existence are not verdicts. The old rule — "under 10 KB is
+    corrupted" — was the only thing standing between a truncated render and a
+    green gate: a 1-byte junk file passed by being "too small" (never opened), and
+    a real 200 KB clip with no narration passed outright. So the file is parsed
+    (`media.probe`) and the findings are duration, stream presence and resolution
+    against `expect`; the 9:16 aspect is only used when no resolution was recorded.
+    """
+    out = {"passed": False, "size_bytes": 0, "duration": 0.0, "width": 0, "height": 0,
+           "has_video": False, "has_audio": False, "probe_used": False,
+           "ffmpeg_available": False, "video_stream": None, "audio_stream": None,
+           "issues": []}
+
+    def fail(check, issue):
+        out["issues"].append({"severity": "fail", "check": check, "issue": issue})
+
+    if not mp4_path:
+        fail("mp4", "no final MP4 on record — the project has not been assembled yet")
+        return out
     from .media import probe as probe_media
 
-    info = probe_media(mp4_path)
-    width = info.get("width", 0)
-    height = info.get("height", 0)
-    duration = info.get("duration", 0.0)
+    info = probe_media(mp4_path) or {}
+    out["size_bytes"] = int(info.get("size_bytes") or 0)
+    out["probe_used"] = bool(info.get("probe_used"))
+    out["ffmpeg_available"] = bool(info.get("ffmpeg_available"))
+    out["duration"] = float(info.get("duration") or 0.0)
+    out["width"] = int(info.get("width") or 0)
+    out["height"] = int(info.get("height") or 0)
+    out["video_stream"] = info.get("video_stream")
+    out["audio_stream"] = info.get("audio_stream")
+    out["has_video"] = bool(info.get("has_video"))
+    out["has_audio"] = bool(info.get("has_audio"))
+    name = os.path.basename(mp4_path)
 
-    has_video = width > 0 and height > 0
-    has_audio = True
+    if not out["size_bytes"]:
+        fail("mp4", f"the recorded final MP4 is not on disk ({mp4_path}) — re-run Assemble")
+        return out
+    if not out["probe_used"]:
+        if not out["ffmpeg_available"]:
+            # nothing could look at the file: say so instead of certifying it
+            out["issues"].append({"severity": "warn", "check": "mp4",
+                                  "issue": f"{name}: container could not be parsed (no ffmpeg on "
+                                           "this machine) — the file exists but is unverified"})
+            out["passed"] = True
+            return out
+        # ffmpeg ran and found no streams at all: that is a broken export, not an
+        # unverifiable one (a 1-byte junk file used to be judged by size alone)
+        fail("mp4", f"{name} ({out['size_bytes']} bytes) is not a readable MP4 — no streams "
+                    "could be parsed out of it")
+        return out
 
-    if not has_video:
-        issues.append({"severity": "fail", "check": "mp4", "issue": "MP4 contains no valid video stream"})
+    if not out["has_video"] or out["width"] <= 0 or out["height"] <= 0:
+        fail("mp4", f"{name} ({out['size_bytes']} bytes) has no decodable video stream — the "
+                    "render is truncated or corrupt, not merely small")
+    if out["duration"] < 1.0:
+        fail("mp4", f"{name} is only {out['duration']:.2f}s long — a real cut is not under a second")
+    # a silent export is exactly the dud this gate exists to catch (an audio stage
+    # deferred on a CPU box, a mux that dropped the track)
+    if not out["has_audio"]:
+        fail("mp4", f"{name} has no audio stream — the Khmer narration never made it into the mux")
 
-    # Aspect ratio check (vertical 9:16 check)
-    if width > 0 and height > 0:
-        ratio = width / height
-        expected_ratio = target_aspect[0] / target_aspect[1]
-        if abs(ratio - expected_ratio) > 0.05:
-            issues.append({
-                "severity": "warn",
-                "check": "aspect_ratio",
-                "issue": f"Video dimensions {width}x{height} (ratio {ratio:.2f}) deviate from expected {target_aspect[0]}:{target_aspect[1]} ({expected_ratio:.2f})",
-            })
+    if expect:
+        ew, eh = expect
+        if out["width"] and (out["width"] != ew or out["height"] != eh):
+            out["issues"].append({"severity": "warn", "check": "resolution",
+                                  "issue": f"exported at {out['width']}x{out['height']}, the "
+                                           f"project renders at {ew}x{eh} — check "
+                                           "settings.video / assembly.resolution"})
+    elif out["width"] and out["height"]:
+        ratio = out["width"] / out["height"]
+        if abs(ratio - (9 / 16)) > 0.05:
+            out["issues"].append({"severity": "warn", "check": "aspect_ratio",
+                                  "issue": f"{out['width']}x{out['height']} is not vertical 9:16 "
+                                           "(no settings.video on this project to compare against)"})
 
-    if duration < 1.0:
-        issues.append({"severity": "fail", "check": "mp4", "issue": f"Final MP4 duration ({duration:.2f}s) is under 1 second"})
+    out["passed"] = not any(i["severity"] == "fail" for i in out["issues"])
+    return out
 
-    return {
-        "passed": not any(i["severity"] == "fail" for i in issues),
-        "duration": duration,
-        "width": width,
-        "height": height,
-        "has_video": has_video,
-        "has_audio": has_audio,
-        "issues": issues,
-    }
+
+def check_caption_contrast(mp4_path: str, expect_scenes: Optional[List[Dict]] = None) -> Dict:
+    """Is the burnt-in caption still readable on the chosen background?
+
+    Captions are white text on a semi-opaque strip; a bright plate (white studio,
+    a sunlit photo the user uploaded) is what makes them disappear. Sample the band
+    the captions live in at a few points across the cut and report the brightest
+    stretches. A scene the Director deselected is never counted as a problem, and a
+    render without captions returns `checked: false` rather than a fake pass.
+    """
+    out = {"passed": True, "checked": False, "issues": [], "max_band_mean": 0.0,
+           "scenes": []}
+    if not mp4_path or not os.path.exists(mp4_path):
+        out["passed"] = False
+        out["issues"].append({"severity": "fail", "check": "caption_contrast",
+                              "issue": "no final MP4 to sample"})
+        return out
+    try:
+        import cv2
+        import numpy as np
+    except Exception:                                   # headless box without cv2
+        out["issues"].append({"severity": "warn", "check": "caption_contrast",
+                              "issue": "frame sampling unavailable (no opencv) — the caption "
+                                       "band was not checked"})
+        return out
+    dur = 0.0
+    cap = cv2.VideoCapture(mp4_path)
+    if not cap.isOpened():
+        out["issues"].append({"severity": "warn", "check": "caption_contrast",
+                              "issue": "the export could not be opened for frame sampling"})
+        return out
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    dur = (n / fps) if n else 0.0
+    if dur <= 0:
+        dur = float(os.environ.get("QA_SAMPLE_DURATION") or 0.0)
+    means = []
+    for t in (0.15, 0.35, 0.55, 0.75, 0.92):
+        cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, dur * t) * 1000.0)
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            continue
+        h = frame.shape[0]
+        means.append(float(np.mean(frame[int(h * 0.78):int(h * 0.95), :])))
+    cap.release()
+    if not means:
+        out["issues"].append({"severity": "warn", "check": "caption_contrast",
+                              "issue": "no frames could be read from the export"})
+        return out
+    out["checked"] = True
+    out["max_band_mean"] = round(max(means), 1)
+    if max(means) > 205:                                # near-white behind the text
+        out["passed"] = False
+        out["issues"].append({"severity": "warn", "check": "caption_contrast",
+                              "issue": f"the caption band reads {max(means):.0f}/255 (near-white) — "
+                                       "white subtitles on a bright background are hard to read; "
+                                       "pick a darker plate or keep the caption strip on"})
+    return out
 
 
 def validate_example_assets(scenes: List[Dict], repo_root: Optional[str] = None) -> Dict:
@@ -238,7 +347,10 @@ def validate_example_assets(scenes: List[Dict], repo_root: Optional[str] = None)
     return {"passed": not issues, "issues": issues}
 
 
-def run_full_project_qa(scenes: List[Dict], final_mp4_path: Optional[str] = None, content_type: str = "explainer") -> Dict:
+def run_full_project_qa(scenes: List[Dict], final_mp4_path: Optional[str] = None,
+                        content_type: str = "explainer",
+                        target_dimensions: Optional[Tuple[int, int]] = None,
+                        captions_burned: bool = True) -> Dict:
     """Consolidated QA Gate assessment across all dimensions."""
     all_issues = []
 
@@ -259,11 +371,43 @@ def run_full_project_qa(scenes: List[Dict], final_mp4_path: Optional[str] = None
             iss["scene_idx"] = idx
             all_issues.append(iss)
 
-    # 3. Final MP4 validation if path provided
-    mp4_res = None
-    if final_mp4_path and os.path.exists(final_mp4_path):
-        mp4_res = validate_final_mp4(final_mp4_path)
-        all_issues.extend(mp4_res.get("issues", []))
+    # 3. Final MP4 validation if a path is provided. A path that no longer
+    #    resolves is a *failed* check, not a skipped one: the caller (the API,
+    #    a renderer) looked it up in the asset index, so a deleted or truncated
+    #    export has to stop the gate instead of quietly turning it green.
+    mp4_res = validate_final_mp4(final_mp4_path, expect=target_dimensions)
+    all_issues.extend(mp4_res.get("issues", []))
+
+    # 4. the export has to be the cut the board planned, not merely a valid file.
+    #    Only compared when both sides are real: `audio_duration` is 0 until a
+    #    voice stage has written a WAV, and `duration` is 0 until the container was
+    #    actually parsed — comparing either against the plan used to invent a
+    #    mismatch (or hide one).
+    # Length: only a cut that is SHORTER than the board planned means scenes went
+    # missing. A longer export is normal — assembly pads each clip up to the
+    # scene's own `estimated_duration_sec` (and a previz draft runs long by design),
+    # while the voice rows are only as long as the narration. Judging either the
+    # audio sum or an over-length export flags every manual board and teaches the
+    # user to ignore the gate, so both are left alone.
+    planned = float(hook_res.get("estimated_duration") or 0.0)
+    actual = float(mp4_res.get("duration") or 0.0)
+    if mp4_res.get("probe_used") and planned > 0 and actual > 0:
+        missing = planned - actual
+        if missing > max(1.5, planned * 0.10):
+            all_issues.append({"severity": "fail", "check": "sync",
+                               "issue": f"the cut is {actual:.1f}s but the board planned "
+                                        f"{planned:.1f}s — {missing:.1f}s of scenes are missing "
+                                        "from the export (a dropped scene, or a voice/video "
+                                        "stage that never ran)"})
+
+    # 5. Can the burnt-in captions actually be read on the chosen background? Every
+    #    other check in this gate would call a white-on-white cut a success: the
+    #    container is fine, the duration is fine, the audio is there. So the finished
+    #    file is sampled at the band captions live in — measured, never assumed.
+    cap_res = {}
+    if final_mp4_path and captions_burned:
+        cap_res = check_caption_contrast(final_mp4_path)
+        all_issues.extend(cap_res.get("issues", []))
 
     fails = [i for i in all_issues if i.get("severity") == "fail"]
     warns = [i for i in all_issues if i.get("severity") == "warn"]
@@ -279,5 +423,18 @@ def run_full_project_qa(scenes: List[Dict], final_mp4_path: Optional[str] = None
         # estimated_duration_sec per scene) — lets a renderer cross-check it
         # against the timeline it actually assembled
         "estimated_duration": hook_res.get("estimated_duration"),
-        "mp4_verified": mp4_res["passed"] if mp4_res else False,
+        # `mp4_checked`: the container was opened and parsed. `mp4_verified`: it
+        # was opened AND nothing in it failed. Both are reported because the old
+        # single flag said "verified" for a file nobody had read.
+        "mp4_checked": bool(mp4_res.get("probe_used")),
+        "mp4_verified": bool(mp4_res.get("passed")),
+        "final_mp4": final_mp4_path or "",
+        "final_size_bytes": mp4_res.get("size_bytes", 0),
+        # the caption-band measurement, kept as its own dimension so the panel can
+        # show the number (0-255) instead of only a verdict
+        "caption_contrast": {k: cap_res.get(k) for k in
+                             ("checked", "passed", "max_band_mean")} if cap_res
+                            else {"checked": False, "passed": True, "max_band_mean": 0.0,
+                                  "skipped": "no captions burned into the export"
+                                  if not captions_burned else "no final MP4 to sample"},
     }

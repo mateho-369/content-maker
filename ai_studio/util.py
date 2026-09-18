@@ -117,25 +117,41 @@ def human_size(n):
 
 
 # ---------------------------------------------------------------- audio
-def write_wav(path, samples, sr=44100, channels=1, normalize_to=0.92):
-    """Write float (-1..1) samples as 16-bit PCM wav, peak-normalised."""
+def wav_bytes(samples, sr=44100, channels=1, normalize_to=0.0):
+    """Float (-1..1) samples → 16-bit PCM wav bytes.
+
+    The endpoints that hand the browser a sound (the sfx picker's preview) need this
+    in memory; `write_wav` is the same encode aimed at a file. Kept in one place
+    because an inline copy in api.py crashed on a missing numpy import — a preview
+    button that 500s is worse than no button at all.
+    """
+    import io
+
     import numpy as np
 
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     x = np.asarray(samples, dtype=np.float32)
     if x.ndim == 1 and channels > 1:
         x = np.repeat(x[:, None], channels, axis=1)
     if x.ndim == 2 and channels == 1:
         x = x.mean(axis=1)
     peak = float(np.max(np.abs(x))) if x.size else 0.0
-    if peak > 1e-6:
+    if normalize_to and peak > 1e-6:
         x = x / peak * float(normalize_to)
     pcm = (np.clip(x, -1.0, 1.0) * 32767.0).astype("<i2")
-    with wave.open(path, "wb") as wf:
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
         wf.setnchannels(int(channels))
         wf.setsampwidth(2)
         wf.setframerate(int(sr))
         wf.writeframes(pcm.tobytes())
+    return buf.getvalue()
+
+
+def write_wav(path, samples, sr=44100, channels=1, normalize_to=0.92):
+    """Write float (-1..1) samples as 16-bit PCM wav, peak-normalised."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "wb") as fh:
+        fh.write(wav_bytes(samples, sr=sr, channels=channels, normalize_to=normalize_to))
     return path
 
 

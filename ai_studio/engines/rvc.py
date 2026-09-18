@@ -81,6 +81,7 @@ def convert(in_wav, out_wav, cfg, profile=None, progress=None):
                 "reason": "timbre stage switched off in settings"}
     want = r.get("engine", "auto")
     attempts = []
+    actions, unreachable = [], False
     for choice in ([want] if want != "auto" else ["http", "cli", "bypass"]) + \
                   ([] if want in ("auto", "bypass") else ["bypass"]):
         if choice == "http":
@@ -91,9 +92,34 @@ def convert(in_wav, out_wav, cfg, profile=None, progress=None):
             res = _bypass(in_wav, out_wav, cfg, profile, attempts)
         if res.get("ok"):
             return res
-    return {"ok": False, "engine": "bypass", "converted": False,
-            "reason": "no RVC back-end usable: " + ("; ".join(attempts) or "n/a"),
-            "attempts": attempts}
+        # a failed back-end also carries what the user can do next
+        unreachable = unreachable or bool(res.get("unreachable"))
+        for act in (res.get("actions") or []):
+            if act not in actions:
+                actions.append(act)
+    # Keep the most specific message the attempts produced (they are written to be
+    # user-facing); a bare "no RVC back-end usable" told the user nothing new.
+    detailed = next((a for a in reversed(attempts) if "⚠️" in str(a)), "")
+    out = {"ok": False, "engine": "bypass", "converted": False,
+           "reason": detailed or ("⚠️ no RVC back-end usable: " + ("; ".join(attempts) or "n/a")),
+           "attempts": attempts}
+    for a in attempts:
+        for act in (a.get("actions") or []) if isinstance(a, dict) else []:
+            out.setdefault("actions", []).append(act)
+    if unreachable or any("no answer from port" in str(a) for a in attempts):
+        out["unreachable"] = True
+        actions = [a for a in (actions + ["start-rvc", "bypass-rvc", "help"]) ]
+    if actions:
+        out["actions"] = list(dict.fromkeys(actions))
+    return out
+
+
+def _unreachable(base, err, r):
+    """One sentence a user can act on, instead of a socket error."""
+    return (f"⚠️ RVC service unavailable — nothing answered on {base} ({err[:80]}). "
+            f"Start it (run_rvc.bat, or `python infer-web.py --port "
+            f"{r.get('port') or 9513}` in the RVC-WebUI folder), or set rvc.engine=bypass "
+            f"in Settings to keep the Stage-3a voice and finish the render anyway.")
 
 
 def _fields(cfg, profile, in_wav, out_wav):
@@ -123,11 +149,15 @@ def _http_convert(in_wav, out_wav, cfg, profile, progress, attempts):
     r = cfg.get("rvc", {})
     base = (r.get("api_base") or "").rstrip("/")
     if not base or not http_reachable(cfg):
-        attempts.append("http: no answer from " + (base or "api_base"))
-        return {"ok": False}
+        attempts.append(_unreachable(base or "the configured rvc.api_base",
+                                     "no answer from port", r))
+        return {"ok": False, "unreachable": True, "service": base,
+                "actions": ["start-rvc", "bypass-rvc", "help"]}
     if not (profile or {}).get("pth_path"):
-        attempts.append("http: no voice profile selected")
-        return {"ok": False}
+        attempts.append("⚠️ no RVC voice profile selected — pick a .pth/.index pair in "
+                        "Settings → Voice (or under rvc.profiles in config.yaml), or switch "
+                        "to an Edge-TTS voice, which needs no profile at all")
+        return {"ok": False, "actions": ["pick-profile", "use-edgetts", "help"]}
     subs = _fields(cfg, profile, in_wav, out_wav)
     boundary = "----aiStudio" + uuid.uuid4().hex
     parts = []
@@ -163,8 +193,13 @@ def _http_convert(in_wav, out_wav, cfg, profile, progress, attempts):
             raw = resp.read()
             ctype_out = resp.headers.get("Content-Type", "")
     except Exception as e:
-        attempts.append(f"http request failed: {str(e)[:160]}")
-        return {"ok": False}
+        # The raw urllib text ("no answer from port 9513", "<urlopen error …>") is
+        # what users actually reported reading with no idea what to do. Name the
+        # service, the address and the two ways out.
+        err = str(e)[:160]
+        attempts.append(_unreachable(base, err, r))
+        return {"ok": False, "unreachable": True, "service": base,
+                "actions": ["start-rvc", "bypass-rvc", "help"]}
     mode = r.get("api_result_mode") or "auto"
     looks_audio = not ctype_out.startswith("application/json") and raw[:4] in (b"RIFF", b"ID3\x03") \
         or raw[:3] == b"Ogg"
@@ -281,6 +316,12 @@ def _bypass(in_wav, out_wav, cfg, profile, attempts):
     r = cfg.get("rvc", {})
     semis = float(r.get("pitch") or 0)
     formant = float(r.get("formant_shift") or 0)
+    if not os.path.exists(in_wav):
+        # convert() promises never to raise; a missing Stage-3a file used to
+        # propagate FileNotFoundError and the stage card read like a crash.
+        return {"ok": False, "engine": "bypass", "converted": False,
+                "reason": ("the Stage-3a voice file is missing, so there is nothing to convert — "
+                           "run the voice stage for this scene first")}
     ensure_dir(os.path.dirname(out_wav) or ".")
     reason = ("; ".join(attempts) if attempts else
               "no RVC back-end available — using the Stage-3a voice directly (timbre unchanged)")

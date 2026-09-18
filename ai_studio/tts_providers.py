@@ -190,7 +190,11 @@ class BaseTTSProvider(abc.ABC):
         ensure_dir(os.path.dirname(out_wav) or ".")
 
         try:
-            res = self.synthesize_raw(clean_text, raw_tmp, cfg, progress=progress)
+            try:
+                res = self.synthesize_raw(clean_text, raw_tmp, cfg, progress=progress,
+                                          emotion=emotion)
+            except TypeError:                       # a provider that does not take emotion yet
+                res = self.synthesize_raw(clean_text, raw_tmp, cfg, progress=progress)
             if not res.get("ok") or not os.path.exists(raw_tmp):
                 return res
 
@@ -282,21 +286,30 @@ class HuggingFaceTTSProvider(BaseTTSProvider):
 # ------------------------------------------------------------- Edge-TTS Provider
 class EdgeTTSStudioProvider(BaseTTSProvider):
     id = "edge_tts"
-    name = "Microsoft Neural TTS (Edge-TTS km-KH-PisethNeural)"
+    name = "Microsoft Neural TTS (Edge-TTS Khmer: Piseth / Sreymom)"
     is_local = False
     requires_api_key = False
 
     def is_available(self, cfg: dict) -> bool:
         try:
-            from .engines.edge_tts_provider import EdgeTTSProvider
+            import edge_tts  # noqa: F401
             return True
         except Exception:
             return False
 
-    def synthesize_raw(self, text: str, out_wav: str, cfg: dict, progress=None) -> dict:
+    def synthesize_raw(self, text: str, out_wav: str, cfg: dict, progress=None,
+                       emotion: str = None) -> dict:
+        """Speak with the voice the Director picked in settings — `tts.voice`.
+
+        This used to hardcode male/neutral, which made the voice picker a lie:
+        whatever you chose, you got Piseth.
+        """
         from .engines.edge_tts_provider import EdgeTTSProvider
+        t = (cfg or {}).get("tts", {}) or {}
         p = EdgeTTSProvider()
-        return p.synthesize_to_file(text, out_wav, gender="male", emotion="neutral")
+        return p.synthesize_to_file(text, out_wav, gender=t.get("gender") or "male",
+                                    emotion=emotion or t.get("emotion") or "neutral",
+                                    voice=t.get("voice") or "")
 
 
 # ------------------------------------------------------------- Placeholder Provider
@@ -341,6 +354,18 @@ def list_providers(cfg: dict) -> list[dict]:
             "available": prov.is_available(cfg),
         })
     return out
+
+
+def list_emotional_styles() -> list[dict]:
+    """The delivery styles the post-processing understands, for pickers.
+
+    Keys + the knobs each one drives, so the UI shows what a style does instead
+    of a bare word list (`engines.tts.status` only exposes the names).
+    """
+    return [{"id": key, "label": key.capitalize(), "desc": st.get("desc", ""),
+             "speed": st.get("speed"), "pitch_semitones": st.get("pitch_semitones"),
+             "energy": st.get("energy"), "pause_factor": st.get("pause_factor")}
+            for key, st in EMOTIONAL_STYLES.items()]
 
 
 def synthesize_speech(text: str, out_wav: str, cfg: dict,

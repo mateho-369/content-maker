@@ -35,6 +35,65 @@ from .context import RunContext
 from .stages import run_stage
 
 
+def select_jobs(full_jobs, skip_stages=(), scenes_off=()):
+    """Apply the run's two selectors to the job graph.
+
+    ``skip_stages`` switches whole stages off; ``scenes_off`` removes one scene from
+    every stage. Both are done by *removing the job and rewiring whoever waited on
+    it*: a dependant left pointing at a job that will never exist is treated as
+    satisfied by the executor, which is how a deselected scene used to end up still
+    in the cut, and how a skipped stage used to end up with assembly running before
+    any clip did (or blocking forever once the graph was rebuilt after Stage 1).
+
+    Returns ``(jobs, dropped)`` — ``dropped`` is what the run records as `skipped`.
+    """
+    skip = set(skip_stages or ())
+    jobs = dict(full_jobs)
+    if skip:
+        jobs = {k: _retarget(j, skip) for k, j in jobs.items()}
+    dropped = {}
+    off = set(scenes_off or ())
+    for key, job in list(jobs.items()):
+        if job.stage in skip or (job.scene_idx >= 0 and job.scene_idx in off):
+            dropped[key] = job
+            del jobs[key]
+    if dropped:
+        for job in jobs.values():
+            live = tuple(d for d in job.deps if d not in dropped)
+            if len(live) != len(job.deps):
+                job.deps = live
+    return jobs, dropped
+
+
+def _retarget(job, skip):
+    """Re-point one job's dependencies past the stages in ``skip``.
+
+    ``assemble`` depends on ``qa``; switch QA off and assembly must wait for what
+    QA waited for (the per-scene picture and voice), not launch immediately. Scene
+    indexes are preserved, so a per-scene chain stays per-scene.
+    """
+    if job.stage in skip or not job.deps:
+        return job
+    out = set()
+
+    def expand(dep_key, depth=0):
+        stage, _, idx = str(dep_key).partition("#")
+        if stage in skip and depth < len(stagespec.ORDER) + 2:
+            sp = stagespec.STAGE_BY_KEY.get(stage)
+            for up in (getattr(sp, "depends", ()) or ()):
+                expand("%s#%s" % (up, idx) if idx else up, depth + 1)
+            return
+        out.add(dep_key)
+
+    for d in job.deps:
+        expand(d)
+    if out == set(job.deps):
+        return job
+    import dataclasses
+
+    return dataclasses.replace(job, deps=tuple(sorted(out)))
+
+
 class Scheduler:
     def __init__(self, db, data_root, bus=None, cfg=None):
         self.db = db
@@ -55,7 +114,8 @@ class Scheduler:
 
     # ------------------------------------------------------------------- start
     async def start_run(self, project_id, trigger="new", resume_from="", force_stages=None,
-                        auto_start=True, scene_count_hint=None):
+                        auto_start=True, scene_count_hint=None, skip_stages=None,
+                        skip_scenes=None, force_scenes=None):
         project = self.db.get_project(project_id)
         if not project:
             raise KeyError(f"project {project_id} not found")
@@ -68,15 +128,41 @@ class Scheduler:
             last = project.get("last_run_id") or ""
             prev = self.db.get_run(last) if last else None
         force = [s for s in (force_stages or []) if s in stagespec.STAGE_BY_KEY]
+        # "re-render scene 2 with this new wording" means scene 2 only: everything
+        # else in the forced stages keeps the clip it already has (inherited from
+        # the run being resumed) instead of being paid for twice.
+        only_scenes = sorted({int(i) for i in (force_scenes or []) if str(i).lstrip("-").isdigit()})
+        # Manual Control Panel: the Director may switch whole stages off for this
+        # run (no SFX, no QA, no captions) and untick individual scenes. Skipped
+        # work is recorded as `skipped`, never as `done`, and dependants are told
+        # why — a run that quietly did less than it claimed is the worst outcome.
+        skip = [s for s in (skip_stages or []) if s in stagespec.STAGE_BY_KEY]
+        scenes_off = sorted({int(i) for i in (skip_scenes or []) if str(i).lstrip("-").isdigit()})
+        board = self.db.list_scenes(project_id) or []
+        disabled = sorted(int(s["idx"]) for s in board if (s.get("meta") or {}).get("disabled"))
+        for i in disabled:
+            if i not in scenes_off:
+                scenes_off.append(i)
+        scenes_off = sorted(set(scenes_off))
         inheriting = bool(prev) and (trigger != "new" or force)
 
-        n_scenes = scene_count_hint if scene_count_hint is not None else len(
-            self.db.list_scenes(project_id))
+        n_scenes = scene_count_hint if scene_count_hint is not None else len(board)
         full_jobs, _ = stagespec.build_graph(n_scenes, plan=plan, cfg=cfg)
         pending_jobs = (stagespec.build_graph(n_scenes, plan=plan, cfg=cfg, only=force)[0]
                         if force else full_jobs)
+        if force and only_scenes:
+            pending_jobs = {k: j for k, j in pending_jobs.items()
+                            if j.stage not in force or j.scene_idx < 0
+                            or j.scene_idx in only_scenes}
         if not inheriting:
-            pending_jobs = full_jobs
+            # a copy: dropping below must not empty full_jobs — that dict is what
+            # writes the row for every skipped job, and it aliasing was why the
+            # skipped rows silently vanished in an earlier version of this
+            pending_jobs = dict(full_jobs)
+        dropped = {}
+        if skip or scenes_off:
+            # the one place that decides what this run does — see select_jobs()
+            pending_jobs, dropped = select_jobs(pending_jobs, skip, scenes_off)
         inherit = {}
         if inheriting and prev:
             inherit = {stagespec.job_key(r["stage"], r["scene_idx"]): r
@@ -85,8 +171,6 @@ class Scheduler:
                 # a plain resume must actually resume: everything that already
                 # finished is inherited instead of being rendered a second time
                 pending_jobs = {k: j for k, j in pending_jobs.items() if k not in inherit}
-                if not pending_jobs:
-                    pending_jobs = {}
 
         run = self.db.create_run(
             project_id, status="queued", trigger=trigger,
@@ -99,6 +183,11 @@ class Scheduler:
             if key in pending_jobs:
                 self.db.upsert_stage(run_id, project_id, job.stage, job.scene_idx, status="queued",
                                      message="")
+            elif key in dropped:
+                why = ("stage disabled for this run" if job.stage in skip else
+                       f"scene {job.scene_idx + 1} not selected for this run")
+                self.db.upsert_stage(run_id, project_id, job.stage, job.scene_idx,
+                                     status="skipped", progress=0.0, message=why)
             else:
                 src = inherit.get(key) or {}
                 self.db.upsert_stage(
@@ -109,11 +198,12 @@ class Scheduler:
 
         st = _ActiveRun(run_id, project_id, pending_jobs, cfg, plan, project, run, self.bus,
                         self.db, self.data_root, resume_from=(prev["id"] if inheriting and prev else ""),
-                        force_stages=force)
+                        force_stages=force, skip_stages=skip, skip_scenes=scenes_off)
         self.runs[run_id] = st
         self.bus.publish("run_queued", {"trigger": trigger, "jobs": len(pending_jobs),
                                         "inherited": len(full_jobs) - len(pending_jobs),
-                                        "force": force, "plan": _plan_summary(plan)},
+                                        "force": force, "plan": _plan_summary(plan),
+                                        "skipped_stages": skip, "skipped_scenes": scenes_off},
                         run_id=run_id, project_id=project_id)
         if auto_start:
             st.task = asyncio.create_task(self._execute(st))
@@ -121,15 +211,21 @@ class Scheduler:
                 "inherited": len(full_jobs) - len(pending_jobs), "plan": _plan_summary(plan)}
 
     async def rerun_stage(self, run_id, stage, scene_idx=None, project_id=None):
-        """'Regenerate just this stage' — forks a run limited to that stage + downstream."""
+        """'Regenerate just this stage' — forks a run limited to that stage + downstream.
+
+        With `scene_idx` it is genuinely one scene: the forced stage runs for that
+        scene alone and every other scene's finished clip is inherited, so
+        "re-render this row" does not quietly re-render the whole board.
+        """
         run = self.db.get_run(run_id)
         if not run:
             raise KeyError("run not found")
         pid = project_id or run["project_id"]
         if stage not in stagespec.STAGE_BY_KEY:
             raise KeyError(f"unknown stage {stage}")
+        scope = None if scene_idx is None or int(scene_idx) < 0 else [int(scene_idx)]
         return await self.start_run(pid, trigger="regenerate", resume_from=run_id,
-                                    force_stages=[stage])
+                                    force_stages=[stage], force_scenes=scope)
 
     # ------------------------------------------------------------- control plane
     async def cancel_run(self, run_id):
@@ -158,6 +254,35 @@ class Scheduler:
         self.db.update_run(run_id, status="running")
         self.bus.publish("run_resumed", {}, run_id=run_id, project_id=st.project_id)
         return {"ok": True}
+
+    # ---- live control: skip ONE scene while the run is in flight ----
+    def skip_scene_now(self, run_id, scene_idx):
+        """Exclude a scene from everything not yet started (the [Skip Scene] button).
+
+        Already-running jobs for it finish and are dropped by assembly, which is
+        what makes this safe to press mid-render: no half-written scene ends up in
+        the cut.
+        """
+        st = self.runs.get(run_id)
+        scene_idx = int(scene_idx)
+        if not st:
+            run = self.db.get_run(run_id)
+            if not run:
+                return {"ok": False, "reason": "run not found"}
+            return {"ok": False, "reason": ("this run is not live any more — untick the scene on "
+                                          "the board (or in the Manual Control Panel) and run again")}
+        st.skip_scenes.add(scene_idx)
+        st.ctx.skip_scenes.add(scene_idx)
+        for key, job in list(st.pending.items()):
+            if job.scene_idx == scene_idx:
+                del st.pending[key]
+                self.db.upsert_stage(run_id, st.project_id, job.stage, scene_idx, status="skipped",
+                                     message=f"skipped live at scene {scene_idx + 1}")
+                st.satisfied.add(key)
+        self.bus.publish("scene_skipped", {"scene_idx": scene_idx,
+                                           "remaining": len(st.pending)},
+                         run_id=run_id, project_id=st.project_id)
+        return {"ok": True, "scene_idx": scene_idx, "jobs_left": len(st.pending)}
 
     async def wait(self, run_id, timeout=None):
         st = self.runs.get(run_id)
@@ -369,11 +494,21 @@ class Scheduler:
                      stage=sp.key, scene_idx=job.scene_idx)
 
     async def _reexpand(self, st):
-        """Stage 1 is what tells us how many scenes there are — expand the graph then."""
+        """Stage 1 is what tells us how many scenes there are — expand the graph then.
+
+        The run's own selections are respected here: re-adding a job the Director
+        switched off re-attaches a dependency to it, and assembly then waits on a
+        stage that will never run (which is exactly how a `skip_stages`/`skip_scenes`
+        run used to end with `assemble: blocked`).
+        """
         scenes = self.db.list_scenes(st.project_id)
         jobs, _order = stagespec.build_graph(len(scenes), plan=st.plan, cfg=st.cfg)
+        off = set(st.skip_scenes) | {int(sc["idx"]) for sc in scenes
+                                     if (sc.get("meta") or {}).get("disabled")}
         added = 0
         for key, job in jobs.items():
+            if job.stage in st.skip_stages or (job.scene_idx >= 0 and job.scene_idx in off):
+                continue
             st.jobs.setdefault(key, job)
             if key in st.satisfied or key in st.running:
                 continue
@@ -391,14 +526,22 @@ class Scheduler:
         finished_rows = [r for r in rows if r["status"] not in ("pending", "queued")]
         ok = [r for r in finished_rows if r["status"] in ("done", "skipped", "deferred")]
         failed_rows = [r for r in finished_rows if r["status"] == "failed"]
+        # `blocked` is not a pass. A stage that never ran because its inputs were
+        # missing used to settle into a green `completed` run with no MP4 at the
+        # end of it, which is the worst possible thing the panel can say.
+        blocked_rows = [r for r in finished_rows if r["status"] == "blocked"]
+        asm = [r for r in rows if r["stage"] == "assemble"]
+        asm_ok = (not asm) or any(r["status"] in ("done", "skipped", "deferred") for r in asm)
         if st.cancel.is_set():
             status = "cancelled"
-        elif st.needs_review and not failed_rows:
+        elif st.needs_review and not failed_rows and not blocked_rows:
             status = "needs_review"
-        elif failed_rows or scheduler_errors:
+        elif failed_rows or blocked_rows or scheduler_errors:
             status = "partial" if ok else "failed"
         elif not finished_rows:
             status = "cancelled"
+        elif not asm_ok:
+            status = "partial"
         else:
             status = "completed"
         summary = RunProgress.overall(rows)
@@ -411,7 +554,12 @@ class Scheduler:
                               for r in failed_rows[:3])
         elif scheduler_errors:
             err = "; ".join(scheduler_errors)[:400]
+        elif blocked_rows or not asm_ok:
+            who = ", ".join(sorted({f"{r['stage']}#{r['scene_idx']}" for r in blocked_rows})) or "assemble"
+            err = (f"{who} never ran — its dependencies were not met, so the final cut was NOT "
+                   f"produced. Re-run the missing stage(s) (or use GPU catch-up) to finish the video.")
         stats.update({"stages_seen": len(rows), "stages_done": len(ok), "stages_failed": len(failed_rows),
+                      "stages_blocked": len(blocked_rows), "cut_produced": bool(final),
                       "deferred_stages": deferred, "overall_pct": summary["pct"],
                       "elapsed_sec": round(time.time() - (st.started_at or time.time()), 1),
                       "errors": ([err] if err else [])[:1]})
@@ -457,12 +605,14 @@ class _ActiveRun:
     """Mutable scheduling state for one run."""
 
     def __init__(self, run_id, project_id, jobs, cfg, plan, project, run, bus, db, data_root,
-                 resume_from="", force_stages=()):
+                 resume_from="", force_stages=(), skip_stages=(), skip_scenes=()):
         self.run_id, self.project_id = run_id, project_id
         self.jobs = dict(jobs)
         self.cfg, self.plan, self.project, self.run = cfg, plan, project, run
         self.bus, self.db, self.data_root = bus, db, data_root
         self.resume_from, self.force_stages = resume_from, tuple(force_stages)
+        self.skip_stages, self.skip_scenes = tuple(skip_stages), set(skip_scenes or ())
+        self.started_at = now()
         self.pending = dict(self.jobs)
         self.satisfied, self.failed, self.blocked, self.results = set(), set(), set(), {}
         self.running, self.semaphores = {}, {}
@@ -472,7 +622,10 @@ class _ActiveRun:
         self.started_at = time.time()
         self.ctx = RunContext(db, cfg, plan, project, run, bus=bus, data_root=data_root,
                               cancel=self.cancel, resume_from=resume_from,
-                              force_stages=force_stages)
+                              force_stages=force_stages, skip_stages=skip_stages,
+                              skip_scenes=skip_scenes)
+
+
 
 
 async def _await_some(running):
