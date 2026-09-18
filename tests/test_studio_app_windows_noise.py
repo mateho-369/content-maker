@@ -3,7 +3,9 @@
 1. Windows asyncio printed a `ConnectionResetError [WinError 10054]` traceback
    for every video range request the browser aborted — normal behaviour that
    looked like a crash and buried the real log.
-2. The /gallery footers hardcoded runtimes that drifted from the rendered MP4s.
+2. The gallery hardcoded runtimes that drifted from the rendered MP4s. It is an endpoint
+   now (`/api/gallery`), so these tests hold that line here: measured specs, a probe cache
+   keyed by (mtime, size), and a missing file reported instead of quietly dropped.
 """
 import asyncio
 import logging
@@ -88,17 +90,9 @@ def test_serving_app_installs_the_handler_on_startup(tmp_path):
     assert seen["handler"] is not None, "the lifespan did not patch the serving loop"
 
 
-# ------------------------------------------------------- /gallery runtime footer
-@pytest.fixture()
-def gallery_app(tmp_path, monkeypatch):
-    app = app_mod.create_app(data_root=str(tmp_path / "data"))
-    monkeypatch.setattr(app_mod, "ROOT", str(tmp_path), raising=True)
-    monkeypatch.setattr(app_mod, "_gallery_runtime_cache", {}, raising=True)
-    return app
-
-
+# ------------------------------------------- /api/gallery: measured specs, never typed ones
 def _make_clip(path, seconds=1.0):
-    """A real (tiny) H.264 clip so media_duration() has something to probe."""
+    """A real (tiny) H.264 clip so the probe has something to measure."""
     from ai_studio.util import ffmpeg_exe
     ff = ffmpeg_exe() or "ffmpeg"
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -108,38 +102,83 @@ def _make_clip(path, seconds=1.0):
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def test_gallery_footer_shows_the_probed_runtime(gallery_app, tmp_path):
-    out = tmp_path / "outputs"
-    rel = "love_vs_situationship_white/Love_vs_Situationship_White_Final.mp4"
-    _make_clip(os.path.join(str(out), rel.replace("/", os.sep)), seconds=2.0)
-
-    with TestClient(gallery_app) as client:
-        html = client.get("/gallery").text
-
-    assert "38.41s" not in html, "stale hardcoded runtime is still in the footer"
-    assert "2.00s · 720×1280" in html
-    assert 'preload="none"' in html            # no speculative range fetches
-
-
-def test_gallery_footer_survives_unrendered_videos(gallery_app):
-    with TestClient(gallery_app) as client:
-        res = client.get("/gallery")
-    assert res.status_code == 200
-    assert "— · 720×1280" in res.text
+@pytest.fixture()
+def gallery(tmp_path):
+    """A studio whose data root is a temp dir, so the gallery sees only this test's files."""
+    from ai_studio import api as api_mod
+    from ai_studio.app import StudioState, create_app
+    root = str(tmp_path / "data")
+    api_mod._GALLERY_PROBE_CACHE.clear()
+    with TestClient(create_app(root)) as client:
+        client.st = StudioState(root)
+        client.root = root
+        yield client
 
 
-def test_gallery_footer_label_is_cached_per_mtime(tmp_path, monkeypatch):
-    out = tmp_path / "outputs" / "myth_vs_fact"
-    out.mkdir(parents=True)
-    clip = out / "Myth_vs_Fact_Final.mp4"
-    _make_clip(str(clip), seconds=1.0)
+def _final(client, rel, seconds=2.0, width=64, height=64, exists=True):
+    st = client.st
+    pid = st.db.create_project(title="gallery probe", mode="A", status="done",
+                              script="line", settings={})["id"]
+    path = os.path.join(client.root, rel)
+    if exists:
+        _make_clip(path, seconds=seconds)
+    st.db.add_asset(pid, "final", path, stage="assemble", mime="video/mp4", duration=seconds,
+                    meta={"width": width, "height": height})
+    return pid, path
 
-    monkeypatch.setattr(app_mod, "ROOT", str(tmp_path), raising=True)
-    cache = {}
-    monkeypatch.setattr(app_mod, "_gallery_runtime_cache", cache, raising=True)
 
-    first = app_mod.gallery_footer_label("myth_vs_fact/Myth_vs_Fact_Final.mp4")
-    assert len(cache) == 1
-    second = app_mod.gallery_footer_label("myth_vs_fact/Myth_vs_Fact_Final.mp4")
-    assert first == second == "1.00s · 720×1280 · H.264 / AAC"
-    assert app_mod.gallery_footer_label("myth_vs_fact/Nope.mp4").startswith("—")
+def _card(client, pid, query="?probe=1"):
+    items = client.get("/api/gallery" + query).json()["items"]
+    return [c for c in items if c["project_id"] == pid][0]
+
+
+def test_gallery_reports_the_measured_runtime(gallery):
+    """What a card claims comes from the file, not from a string in the source."""
+    pid, _path = _final(gallery, "outputs/probe.mp4", seconds=2.0)
+    card = _card(gallery, pid)
+    assert card["verified"] is True and abs(float(card["duration"]) - 2.0) < 0.35, card
+    assert (card["width"], card["height"]) == (64, 64), card
+    # without ?probe=1 the same card is still honest about where its numbers came from
+    lazy = _card(gallery, pid, query="")
+    assert lazy["verified"] is False and "render record" in gallery.get("/api/gallery").json()["note"], lazy
+
+
+def test_gallery_survives_a_cut_that_went_missing(gallery):
+    """A deleted export is a fact about the project — listed and labelled, never hidden."""
+    pid, _ = _final(gallery, "outputs/gone.mp4", seconds=9.0, width=1080, height=1920, exists=False)
+    card = _card(gallery, pid)
+    assert card["missing"] is True and card["verified"] is False, card
+    assert card["duration"] == 9.0 and (card["width"], card["height"]) == (1080, 1920), card
+
+
+def test_the_probe_is_cached_until_the_file_changes(gallery, monkeypatch):
+    """Cached because re-opening every export per paint is what made the gallery slow;
+    keyed by (mtime, size) so a re-render is measured again."""
+    from ai_studio import api as api_mod
+    pid, path = _final(gallery, "outputs/cached.mp4", seconds=1.0)
+    assert _card(gallery, pid)["verified"] is True
+    assert path in api_mod._GALLERY_PROBE_CACHE, list(api_mod._GALLERY_PROBE_CACHE)
+
+    calls = {"n": 0}
+    real = api_mod._gallery_probe
+
+    def spy(p):
+        calls["n"] += 1
+        return real(p)
+
+    monkeypatch.setattr(api_mod, "_gallery_probe", spy)
+    assert _card(gallery, pid)["verified"] is True
+    assert calls["n"] == 1, "the cached answer must be returned without touching ffmpeg"
+
+    _make_clip(path, seconds=3.0)                       # re-render into the same path
+    assert _card(gallery, pid)["verified"] is True      # cache key no longer matches
+    assert calls["n"] == 2, "a changed file must be measured again"
+    card = _card(gallery, pid)
+    assert abs(float(card["duration"]) - 3.0) < 0.35, card
+
+
+def test_a_hardcoded_runtime_cannot_come_back():
+    """The page used to print 38.41s for a two-second video; that string is dead."""
+    for rel in ("ai_studio/app.py", "ai_studio/api.py"):
+        text = open(os.path.join(REPO_ROOT, rel)).read()
+        assert "38.41s" not in text, rel

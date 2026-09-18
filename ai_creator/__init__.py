@@ -10,7 +10,6 @@ Modules:
     animation      — character entry/exit/idle/talk transforms
     transitions    — scene transition blending (fade, slide, zoom, wipe)
     renderer       — composes scenes -> final MP4 + SRT + mixed audio
-    app            — FastAPI server + UI
 """
 
 __version__ = "1.0.0"

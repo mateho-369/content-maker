@@ -24,22 +24,51 @@ SR = 44100
 
 
 def probe(path):
-    """{duration, width, height, fps} for a video file — best effort."""
-    out = {"duration": media_duration(path, 0.0), "width": 0, "height": 0, "fps": 0.0}
+    """What is actually inside a media file: {size_bytes, duration, width, height,
+    fps, probe_used, has_video, has_audio, video_stream, audio_stream}.
+
+    `probe_used` is the important field: it is True only when ffmpeg ran and
+    parsed stream lines out of this file. `has_video` / `has_audio` stay True when
+    it is False, so a machine without ffmpeg can never be told a stream is missing
+    — but any caller that wants to claim "the export was verified" must key on
+    `probe_used`, not on those defaults. (The QA gate reports `mp4_checked` from
+    it; before that it reported "checked" for a path that was never opened.)
+
+    `video_stream` / `audio_stream` are None when the stream is absent, so a
+    caller can tell "no audio track" from "could not look".
+    """
+    out = {"size_bytes": 0, "duration": 0.0, "width": 0, "height": 0, "fps": 0.0,
+           "ffmpeg_available": bool(ffmpeg_exe()), "probe_used": False,
+           "has_video": True, "has_audio": True,
+           "video_stream": None, "audio_stream": None}
+    if not path or not os.path.exists(path):
+        return out
+    out["size_bytes"] = os.path.getsize(path)
+    out["duration"] = media_duration(path, 0.0)
     ff = ffmpeg_exe()
-    if not ff or not path or not os.path.exists(path):
+    if not ff:
         return out
     try:
         res = subprocess.run([ff, "-hide_banner", "-i", path], capture_output=True, timeout=60)
         txt = (res.stderr or b"").decode(errors="ignore")
-        m = re.search(r"Video:.*?(\d{2,5})x(\d{2,5})", txt)
-        if m:
-            out["width"], out["height"] = int(m.group(1)), int(m.group(2))
-        m = re.search(r"([\d.]+)\s*fps", txt)
-        if m:
-            out["fps"] = float(m.group(1))
     except Exception:
-        pass
+        return out
+    if "Stream #" not in txt:
+        return out                              # nothing readable → not "checked"
+    out["probe_used"] = True
+    m = re.search(r"Video:.*?(\d{2,5})x(\d{2,5})", txt)
+    if m:
+        out["width"], out["height"] = int(m.group(1)), int(m.group(2))
+        vfps = re.search(r"([\d.]+)\s*fps", txt)
+        out["video_stream"] = {"width": out["width"], "height": out["height"],
+                               "fps": float(vfps.group(1)) if vfps else 0.0}
+    m = re.search(r"Audio:.*?(\d+)\s*Hz", txt)
+    if m:
+        chans = re.search(r"(\d+)\s*channels", m.group(0) if m else txt)
+        out["audio_stream"] = {"sample_rate": int(m.group(1)),
+                                "channels": int(chans.group(1)) if chans else 0}
+    out["has_video"] = bool(out["video_stream"])
+    out["has_audio"] = bool(out["audio_stream"])
     return out
 
 

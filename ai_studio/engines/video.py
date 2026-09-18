@@ -56,7 +56,7 @@ def action_keywords(text, limit=4):
     return " and ".join(words) if words else "gesture"
 
 
-def compose_prompt(scene, cfg, character=False):
+def compose_prompt(scene, cfg, character=False, background=None):
     """Positive prompt = visual tag + house look + mood atmosphere + (character
     pose when a character is in the shot) + (in-place action when character_demo)."""
     vp = (scene.get("visual_prompt") or "").strip().rstrip(".")
@@ -74,34 +74,51 @@ def compose_prompt(scene, cfg, character=False):
     if visual_source == "character_demo":
         parts.append(IN_PLACE_TAIL.format(action=action_keywords(scene.get("text") or "")))
     style_tail = (cfg.get("video", {}) or {}).get("style_tail")
-    parts.append(style_tail if style_tail is not None else STYLE_TAIL)
+    tail = style_tail if style_tail is not None else STYLE_TAIL
+    if background:
+        # a studio plate and "peaceful natural scenery" contradict each other, and
+        # Wan follows the last clause it reads — so the scenery bias is removed and
+        # the Director's backdrop is stated instead.
+        from .. import backgrounds as _bg
+        clause = _bg.prompt_clause(background if isinstance(background, dict) and
+                                  background.get("kind") else
+                                  _bg.resolve(background, width=1, height=1))
+        tail = ", ".join(x for x in (tail.replace(", peaceful natural scenery", ""), clause) if x)
+    parts.append(tail)
     return ", ".join(p for p in parts if p)[:900]
 
 
 def render(scene, out_path, cfg, plan, target_duration, progress=None, seed=0,
-           reference_image=None, attempt=1, character=False):
-    """Produce one silent clip for a scene. Returns a dict (never raises)."""
+           reference_image=None, attempt=1, character=False, background=None):
+    """Produce one silent clip for a scene. Returns a dict (never raises).
+
+    ``background`` (a resolved plate) is honoured differently per engine, and the
+    result always says which: composited pixels for previz, a prompt clause for
+    ComfyUI — an AI clip cannot be re-lit afterwards, and pretending otherwise
+    would be a lie in the render.
+    """
     v = cfg.get("video", {})
     engine = (plan.get("video") or {}).get("engine", "previz") if plan else "previz"
     if engine == "comfyui":
         res = _comfyui(scene, out_path, cfg, target_duration, progress, seed, reference_image,
-                       attempt, character=character)
+                       attempt, character=character, background=background)
         if res.get("ok"):
             return res
         if not res.get("oom") and "fallback_to_previz" not in res:
             res["fallback_to_previz"] = True
         prev = previz_clip(scene, out_path, cfg, target_duration, progress, seed,
-                           character=character)
+                           character=character, background=background)
         prev["fallback_from"] = "comfyui"
         prev["fallback_reason"] = str(res.get("reason", ""))[:300]
         return prev
     if engine == "previz":
         return previz_clip(scene, out_path, cfg, target_duration, progress, seed,
-                           character=character)
+                           character=character, background=background)
     return {"ok": False, "engine": engine, "reason": f"video engine '{engine}' does not render here"}
 
 
-def _values(scene, cfg, target_duration, seed, out_prefix, frames, width, height, character=False):
+def _values(scene, cfg, target_duration, seed, out_prefix, frames, width, height, character=False,
+            background=None):
     v = cfg.get("video", {})
     fps = int(v.get("fps", 16))
     sec = max(0.5, float(target_duration))
@@ -109,7 +126,7 @@ def _values(scene, cfg, target_duration, seed, out_prefix, frames, width, height
     if my_seed == -1:
         my_seed = (abs(int(seed or 0)) * 7919 + int(time.time()) % 9973) % 2**31
     return {
-        "PROMPT": compose_prompt(scene, cfg, character=character),
+        "PROMPT": compose_prompt(scene, cfg, character=character, background=background),
         "NEGATIVE": v.get("negative_prompt") or "",
         "WIDTH": int(width), "HEIGHT": int(height),
         "FRAMES": int(frames), "FPS": int(fps),
@@ -124,7 +141,7 @@ def _values(scene, cfg, target_duration, seed, out_prefix, frames, width, height
 
 
 def _comfyui(scene, out_path, cfg, target_duration, progress, seed, reference_image, attempt,
-             character=False):
+             character=False, background=None):
     v = cfg.get("video", {})
     host = v.get("comfy_host") or "http://127.0.0.1:8188"
     client = ComfyUIClient(host)
@@ -193,28 +210,79 @@ def _comfyui(scene, out_path, cfg, target_duration, progress, seed, reference_im
             "applied": report.get("used"), "target_duration": float(target_duration)}
 
 
-def _still_clip(image, scene, out_path, cfg, plan, total, progress, seed):
-    """A picture + existing Ken Burns helper = the illustration visual source."""
+def _matte_on_plate(image, plate, dst, width, height):
+    """Centre a picture on a plate with a soft drop shadow; returns the path to use.
+
+    Falls back to the untouched picture on any failure — a framing nicety must
+    never cost the scene its visual.
+    """
+    from PIL import Image, ImageFilter
+
+    try:
+        with Image.open(image) as im:
+            src = im.convert("RGBA")
+        src.thumbnail((max(1, int(width * 0.90)), max(1, int(height * 0.90))), Image.LANCZOS)
+        canvas = Image.fromarray(plate).convert("RGBA")
+        x = (canvas.width - src.width) // 2
+        y = (canvas.height - src.height) // 2
+        shadow = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+        shadow.paste((0, 0, 0, 130), (x + 6, y + 10, x + src.width + 6, y + src.height + 10))
+        shadow = shadow.filter(ImageFilter.GaussianBlur(max(3, int(width * 0.012))))
+        canvas = Image.alpha_composite(canvas, shadow)
+        layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+        layer.paste(src, (x, y), src)
+        canvas = Image.alpha_composite(canvas, layer)
+        ensure_dir(os.path.dirname(dst) or ".")
+        canvas.convert("RGB").save(dst, format="PNG")
+        return dst
+    except Exception:
+        return image
+
+
+def _still_clip(image, scene, out_path, cfg, plan, total, progress, seed, background=None):
+    """A picture + existing Ken Burns helper = the illustration visual source.
+
+    With a background chosen, the picture is *matted onto the plate* (fit inside
+    ~90% of the frame with a drop shadow) instead of cover-cropped edge to edge —
+    otherwise the Director's backdrop would be invisible, which is the difference
+    between a control and a decoration.
+    """
     from .. import media
     from ..util import media_duration
 
     v = cfg.get("video", {})
     ensure_dir(os.path.dirname(out_path) or ".")
+    plate = None
+    if background:
+        from .. import backgrounds as _bg
+        plate = _bg.plate(background, width=int(v.get("width", 480)),
+                          height=int(v.get("height", 854)))
+    if plate is not None:
+        image = _matte_on_plate(image, plate, os.path.join(
+            os.path.dirname(out_path) or ".", ".still_on_plate.png"),
+            int(v.get("width", 480)), int(v.get("height", 854)))
     try:
         media.make_silent_video_from_image(
             image, out_path, duration=max(0.8, float(total)),
             width=int(v.get("width", 480)), height=int(v.get("height", 854)),
             fps=min(24, int(v.get("fps", 16)) + 4),
             motion="static")
-        return {"ok": True, "engine": "static", "path": out_path, "duration": total,
+        return {"ok": True, "engine": "static" + (" · on plate" if plate is not None else ""),
+                "path": out_path, "duration": total,
                 "width": int(v.get("width", 480)), "height": int(v.get("height", 854)),
                 "fps": int(v.get("fps", 16)), "still_image": os.path.basename(image),
-                "prompt": compose_prompt(scene, cfg), "target_duration": float(total)}
+                "prompt": compose_prompt(scene, cfg, background=background),
+                # the plate's KEY, same as previz reports — a stage note that says
+                # only "plate" cannot be checked against what the Director chose
+                "background": (background or {}).get("key") or ("plate" if plate is not None else ""),
+                "background_label": (background or {}).get("label") or "",
+                "target_duration": float(total)}
     except Exception as e:
         return {"ok": False, "engine": "static", "reason": f"still clip failed: {str(e)[:200]}"}
 
 
-def previz_clip(scene, out_path, cfg, target_duration, progress=None, seed=0, character=False):
+def previz_clip(scene, out_path, cfg, target_duration, progress=None, seed=0, character=False,
+                background=None):
     """CPU-only animated clip — the draft / Machine-B / OOM-fallback renderer."""
     v = cfg.get("video", {})
     ensure_dir(os.path.dirname(out_path) or ".")
@@ -225,8 +293,8 @@ def previz_clip(scene, out_path, cfg, target_duration, progress=None, seed=0, ch
             fps=min(24, int(v.get("fps", 16)) + 4),
             mood_tag=scene.get("mood_tag") or "", visual_prompt=scene.get("visual_prompt") or "",
             seed=int(seed or 0), motion=float(v.get("motion_strength", 0.75)),
-            progress=progress)
-        info["prompt"] = compose_prompt(scene, cfg, character=character)
+            progress=progress, background=background)
+        info["prompt"] = compose_prompt(scene, cfg, character=character, background=background)
         info["duration"] = media_duration(out_path, info.get("duration", 0.0))
         info["target_duration"] = float(target_duration)
         info["engine"] = "previz"
@@ -275,7 +343,8 @@ def clip_capacity_sec(cfg):
 
 
 def render_scene_clip(scene, out_path, cfg, plan, target_duration, progress=None, seed=0,
-                      reference_image=None, still_image=None, character=False):
+                      reference_image=None, still_image=None, character=False,
+                      background=None):
     """Whole-scene picture, chunked when the clip budget is shorter than the scene.
 
     ``still_image``: a ready-made picture (Director's upload or an illustration
@@ -295,10 +364,12 @@ def render_scene_clip(scene, out_path, cfg, plan, target_duration, progress=None
     total = max(0.6, float(target_duration))
     n_clips = 1 if total <= cap * 1.05 else min(6, int(-(-total // cap)))
     if still_image:
-        return _still_clip(still_image, scene, out_path, cfg, plan, total, progress, seed)
+        return _still_clip(still_image, scene, out_path, cfg, plan, total, progress, seed,
+                           background=background)
     if n_clips <= 1:
         return render(scene, out_path, cfg, plan, total, progress=progress, seed=seed,
-                      reference_image=reference_image, character=character)
+                      reference_image=reference_image, character=character,
+                      background=background)
     per = total / float(n_clips)
     parts, notes, engines, prompts = [], [], set(), []
     ensure_dir(os.path.dirname(out_path) or ".")
@@ -315,7 +386,7 @@ def render_scene_clip(scene, out_path, cfg, plan, target_duration, progress=None
                          f"clip {_c + 1}/{n_clips} · {note}")
         res = render(scene, part, cfg, plan, per, progress=cb, seed=int(seed or 0) + c * 101,
                      reference_image=reference_image if c == 0 else None,
-                     character=character)
+                     character=character, background=background)
         if res.get("ok") and os.path.exists(part):
             parts.append(part)
             engines.add(str(res.get("engine")))

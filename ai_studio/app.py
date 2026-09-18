@@ -10,13 +10,12 @@ moved or backed up by copying that folder.
 import asyncio
 import errno
 import os
-import shutil
 import threading
 import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__, config as cfg_mod, STUDIO_NAME, STUDIO_TAGLINE, api as api_mod
@@ -82,33 +81,8 @@ def quiet_windows_connection_resets(loop=None):
     return loop
 
 
-# probed runtime for the gallery footers: (mtime, label)
-_gallery_runtime_cache = {}
 
 
-def gallery_footer_label(rel_path, specs="720×1280 · H.264 / AAC"):
-    """Footer text for one gallery card: real probed runtime + codec specs.
-
-    The runtime is read from the rendered MP4 (cached per mtime) instead of
-    being hardcoded, so the card can never claim a length the file does not
-    have after a re-render. Missing file / no ffmpeg → just the specs.
-    """
-    path = os.path.join(ROOT, "outputs", *rel_path.split("/"))
-    label = "—"
-    try:
-        mtime = os.path.getmtime(path)
-        cached = _gallery_runtime_cache.get(path)
-        if cached and cached[0] == mtime:
-            label = cached[1]
-        else:
-            from .util import media_duration
-
-            dur = media_duration(path, 0.0)
-            label = f"{dur:.2f}s" if dur and dur > 0 else "—"
-            _gallery_runtime_cache[path] = (mtime, label)
-    except OSError:
-        label = "—"
-    return f"{label} · {specs}"
 
 
 class StudioState:
@@ -165,6 +139,28 @@ class StudioState:
     def seed_dirs(self):
         for sub in ("projects", "voices", "tmp", "models/tts", "models/rvc", "workflows"):
             os.makedirs(os.path.join(self.data_root, sub), exist_ok=True)
+
+    # ---------------------------------------------------------------- renders
+    def final_video(self, project_id):
+        """The finished MP4 for a project, or "" if it never rendered.
+
+        Reads the asset row the assemble stage registers (`kind="final"`,
+        scene_idx -1 — the burned-caption cut when captions were built, else the
+        clean one), falling back to the last run's `stats.final_path` for runs
+        whose asset row didn't land.
+
+        A recorded path is returned even if the file has since been deleted:
+        callers (the QA gate especially) must see that as a *broken render* and
+        fail, not as "nothing to check" and pass.
+        """
+        a = self.db.latest_asset(project_id, "final", scene_idx=-1)
+        if a and a.get("path"):
+            return a["path"]
+        for r in self.db.list_runs(project_id, limit=1):
+            p = (r.get("stats") or {}).get("final_path") or ""
+            if p:
+                return p
+        return ""
 
 
 def create_app(data_root=None, enable_demo_seed=False):
@@ -231,215 +227,14 @@ def create_app(data_root=None, enable_demo_seed=False):
         # hashed Vite assets are cache-safe; index itself is never cached
         return HTMLResponse(html, headers={"Cache-Control": "no-cache, must-revalidate"})
 
-    @app.get("/gallery", response_class=HTMLResponse)
+    @app.get("/gallery", include_in_schema=False)
     async def gallery():
-        html = """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Khmer AI Studio — Video Showcase</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      background: #0d0f12;
-      color: #e2e8f0;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans Khmer", sans-serif;
-      padding: 24px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-    }
-    header {
-      text-align: center;
-      margin-bottom: 28px;
-    }
-    h1 {
-      font-size: 26px;
-      font-weight: 700;
-      background: linear-gradient(135deg, #38bdf8, #818cf8, #f472b6);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      margin-bottom: 8px;
-    }
-    p.subtitle {
-      color: #94a3b8;
-      font-size: 14px;
-    }
-    .nav-links {
-      margin-top: 12px;
-      display: flex;
-      gap: 16px;
-      justify-content: center;
-    }
-    .nav-links a {
-      color: #38bdf8;
-      text-decoration: none;
-      font-size: 13px;
-      padding: 4px 12px;
-      border: 1px solid rgba(56,189,248,0.3);
-      border-radius: 6px;
-      transition: all 0.2s;
-    }
-    .nav-links a:hover {
-      background: rgba(56,189,248,0.1);
-      border-color: #38bdf8;
-    }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
-      gap: 32px;
-      max-width: 900px;
-      width: 100%;
-    }
-    .card {
-      background: #161922;
-      border: 1px solid #2d3748;
-      border-radius: 14px;
-      overflow: hidden;
-      display: flex;
-      flex-direction: column;
-      box-shadow: 0 10px 25px rgba(0,0,0,0.5);
-    }
-    .card-header {
-      padding: 16px 20px;
-      border-bottom: 1px solid #2d3748;
-    }
-    .badge {
-      display: inline-block;
-      font-size: 11px;
-      text-transform: uppercase;
-      font-weight: 700;
-      letter-spacing: 0.5px;
-      padding: 3px 8px;
-      border-radius: 4px;
-      margin-bottom: 6px;
-    }
-    .badge-myth { background: #854d0e; color: #fef08a; }
-    .badge-love { background: #831843; color: #fbcfe8; }
-    .card-title {
-      font-size: 17px;
-      font-weight: 600;
-      color: #f8fafc;
-      line-height: 1.4;
-    }
-    .card-desc {
-      color: #94a3b8;
-      font-size: 13px;
-      margin-top: 4px;
-    }
-    .video-wrap {
-      background: #000;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      padding: 12px;
-    }
-    video {
-      max-width: 100%;
-      height: 480px;
-      border-radius: 8px;
-      outline: none;
-      background: #000;
-    }
-    .card-footer {
-      padding: 14px 20px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      border-top: 1px solid #2d3748;
-      font-size: 12px;
-      color: #94a3b8;
-    }
-    .download-btn {
-      color: #38bdf8;
-      text-decoration: none;
-      font-weight: 600;
-    }
-  </style>
-</head>
-<body>
-  <header>
-    <h1>✦ Khmer AI Content Studio — Live Showcase</h1>
-    <p class="subtitle">Deterministic Vertical 9:16 Video Generation · Coeng-Safe Typography · Cute Reusable Mascot Kiri</p>
-    <div class="nav-links">
-      <a href="/">Open Studio App</a>
-      <a href="/gallery">Showcase Gallery</a>
-      <a href="/docs">FastAPI Interactive Docs</a>
-      <a href="/api/character/default/asset">View Reusable Character</a>
-    </div>
-  </header>
+        """The old showcase page listed three hand-picked renders by name and had its
+        own stylesheet inside this file. A gallery that cannot show YOUR videos is a
+        portfolio, not a feature — so it is gone, and the link now lands on the real
+        gallery panel of the one UI (which lists every project's actual final MP4)."""
+        return RedirectResponse("/#gallery", status_code=302)
 
-  <main class="grid">
-    <!-- Card 0: Love vs Situationship White Background + Internet Photos -->
-    <div class="card" style="border-color: #38bdf8; box-shadow: 0 0 20px rgba(56,189,248,0.2);">
-      <div class="card-header" style="background: rgba(56,189,248,0.06);">
-        <span class="badge" style="background: #0284c7; color: #fff;">Featured · White Studio BG & Internet Examples</span>
-        <div class="card-title">❤️ Real Love vs Situationship 💔 (White Background Studio)</div>
-        <div class="card-desc">Internet Photos · Mascot Actions (Thinking/Point/Meme/CTA) · Coeng Subtitles · Free Khmer Voice</div>
-      </div>
-      <div class="video-wrap" style="background: #f8fafc;">
-        <video controls playsinline preload="none">
-          <source src="/outputs/love_vs_situationship_white/Love_vs_Situationship_White_Final.mp4" type="video/mp4">
-          Your browser does not support the video tag.
-        </video>
-      </div>
-      <div class="card-footer">
-        <span>__RUNTIME_WHITE__</span>
-        <a class="download-btn" href="/outputs/love_vs_situationship_white/Love_vs_Situationship_White_Final.mp4" download>Download MP4 ↓</a>
-      </div>
-    </div>
-
-    <!-- Card 1: Myth vs Fact -->
-    <div class="card">
-      <div class="card-header">
-        <span class="badge badge-myth">Format B · Myth vs Fact</span>
-        <div class="card-title">តើការផឹកទឹកកកពេលក្តៅ ធ្វើឲ្យមិនស្រួលខ្លួនពិតមែនឬ?</div>
-        <div class="card-desc">Hook → Myth → Fact → Meme Reaction → Actionable CTA</div>
-      </div>
-      <div class="video-wrap">
-        <video controls playsinline preload="none">
-          <source src="/outputs/myth_vs_fact/Myth_vs_Fact_Final.mp4" type="video/mp4">
-          Your browser does not support the video tag.
-        </video>
-      </div>
-      <div class="card-footer">
-        <span>__RUNTIME_MYTH__</span>
-        <a class="download-btn" href="/outputs/myth_vs_fact/Myth_vs_Fact_Final.mp4" download>Download MP4 ↓</a>
-      </div>
-    </div>
-
-    <!-- Card 2: Real Love vs Situationship -->
-    <div class="card">
-      <div class="card-header">
-        <span class="badge badge-love">Format A · Compare / Relationship</span>
-        <div class="card-title">តើយើងកំពុងមាន Real Love ឬ Situationship?</div>
-        <div class="card-desc">Side A vs Side B · Meme punch-in · Summary decision</div>
-      </div>
-      <div class="video-wrap">
-        <video controls playsinline preload="none">
-          <source src="/outputs/real_love_vs_situationship/Real_Love_vs_Situationship_Final.mp4" type="video/mp4">
-          Your browser does not support the video tag.
-        </video>
-      </div>
-      <div class="card-footer">
-        <span>__RUNTIME_LOVE__</span>
-        <a class="download-btn" href="/outputs/real_love_vs_situationship/Real_Love_vs_Situationship_Final.mp4" download>Download MP4 ↓</a>
-      </div>
-    </div>
-  </main>
-</body>
-</html>"""
-        # Runtime is probed from the rendered MP4s at request time (cached per
-        # mtime), so the footer never advertises a length the file does not have.
-        html = (html
-                .replace("__RUNTIME_WHITE__", gallery_footer_label(
-                    "love_vs_situationship_white/Love_vs_Situationship_White_Final.mp4"))
-                .replace("__RUNTIME_MYTH__", gallery_footer_label(
-                    "myth_vs_fact/Myth_vs_Fact_Final.mp4"))
-                .replace("__RUNTIME_LOVE__", gallery_footer_label(
-                    "real_love_vs_situationship/Real_Love_vs_Situationship_Final.mp4")))
-        return HTMLResponse(html, headers={"Cache-Control": "no-cache, must-revalidate"})
 
     @app.get("/files/{relpath:path}")
     async def project_files(relpath: str, request: Request):

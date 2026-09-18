@@ -328,15 +328,23 @@ class Database:
         con.execute("BEGIN")
         con.execute("DELETE FROM scenes WHERE project_id=?", (pid,))
         for i, s in enumerate(scenes):
+            # meta_json IS the scene meta. Callers hand us a scene dict whose
+            # production flags live under "meta", so fold that dict in and keep any
+            # other extra key (source/index/…). Storing it nested instead made every
+            # reader compensate (see list_scenes) and left a stray "meta" key inside
+            # the row, which the board then echoed back forever.
+            extra = {k: v for k, v in s.items()
+                     if k not in ("text", "visual_prompt", "mood_tag", "est_duration",
+                                  "estimated_duration_sec", "audio_duration", "sfx_prompt")}
+            nested = extra.pop("meta", None)
+            if isinstance(nested, dict):
+                extra = {**nested, **{k: v for k, v in extra.items() if v is not None}}
             con.execute(
                 "INSERT INTO scenes (project_id,idx,text,visual_prompt,mood_tag,est_duration,"
                 "audio_duration,sfx_prompt,meta_json) VALUES (?,?,?,?,?,?,?,?,?)",
                 (pid, i, s.get("text", ""), s.get("visual_prompt", ""), s.get("mood_tag", ""),
                  float(s.get("estimated_duration_sec") or s.get("est_duration") or 0),
-                 float(s.get("audio_duration") or 0), s.get("sfx_prompt", ""),
-                 jdump({k: v for k, v in s.items()
-                        if k not in ("text", "visual_prompt", "mood_tag", "estimated_duration_sec",
-                                     "audio_duration", "sfx_prompt")})))
+                 float(s.get("audio_duration") or 0), s.get("sfx_prompt", ""), jdump(extra)))
         con.execute("COMMIT")
         return self.list_scenes(pid)
 
@@ -516,7 +524,8 @@ class Database:
              jdump(kw.get("meta") or {}), now()))
         return self.one("SELECT * FROM assets WHERE id=?", (aid,))
 
-    def list_assets(self, project_id=None, run_id=None, stage=None, scene_idx=None, kind=None, limit=500):
+    def list_assets(self, project_id=None, run_id=None, stage=None, scene_idx=None, kind=None,
+                    limit=500, offset=0):
         where, params = [], []
         for col, val in (("project_id", project_id), ("run_id", run_id), ("stage", stage),
                          ("scene_idx", scene_idx), ("kind", kind)):
@@ -526,11 +535,24 @@ class Database:
         sql = "SELECT * FROM assets"
         if where:
             sql += " WHERE " + " AND ".join(where)
-        sql += f" ORDER BY created_at DESC LIMIT {int(limit)}"
+        sql += f" ORDER BY created_at DESC LIMIT {int(limit)} OFFSET {max(0, int(offset))}"
         rows = self.query(sql, params)
         for r in rows:
             r["meta"] = jload(r.pop("meta_json", "{}"), {})
         return rows
+
+    def count_assets(self, project_id=None, kind=None, run_id=None):
+        """How many assets match — the pager's `total` (never a page length)."""
+        where, params = [], []
+        for col, val in (("project_id", project_id), ("kind", kind), ("run_id", run_id)):
+            if val is not None:
+                where.append(f"{col}=?")
+                params.append(val)
+        sql = "SELECT COUNT(*) AS n FROM assets"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        row = self.one(sql, params)
+        return int((row or {}).get("n") or 0)
 
     def latest_asset(self, project_id, kind, stage="", scene_idx=None):
         """The current output for a (kind, stage, scene) slot — what the UI plays."""

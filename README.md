@@ -5,13 +5,18 @@ explains everything — planned by a **team of local Ollama AIs that you persona
 narrated in **your cloned voice**, with animations, transitions, sound effects and karaoke
 captions. **100% local, 100% private.**
 
-This repo now contains three local studios:
+There is **one app**: the Khmer AI Content Studio. It has its own UI and its own API, and
+it is the only server the launchers start.
 
 | Project | Port | What it does |
 |---|---|---|
-| **Khmer AI Content Studio** (`ai_studio/`) — *new, flagship* | `8000` | Director-led multi-agent **video** pipeline: your Khmer script (or a topic) → scenes → Khmer voice → your RVC timbre → Wan 480p footage → MMAudio ambience → QA → final `.mp4`. **→ [README-STUDIO.md](README-STUDIO.md)** |
-| **AI Content Creator** (`ai_creator/`) | `8000` | AI-team planned character videos (this page) — run it on `--port 8002` if the studio above is up |
-| **Auto-Clip Engine v3.0** (`src/`) — legacy | `8001` | Clips viral highlights out of long videos (see [below](#-legacy-auto-clip-engine-v30)) |
+| **Khmer AI Content Studio** (`ai_studio/`) | `8000` | everything, in one workspace: Director-led multi-agent **video** pipeline (your Khmer script or a topic → scenes → Khmer voice → your RVC timbre → Wan 480p footage → MMAudio ambience → QA → final `.mp4`), plus the AI-team planner, the character/voice libraries, image search, the sound-effect folder, the finished-cut gallery and the long-video clip engine. **→ [README-STUDIO.md](README-STUDIO.md)** |
+
+`ai_creator/` and `src/` are now **engines, not websites**: their Jinja pages and their
+launchers were deleted, their modules are imported by `ai_studio/api.py`, and they remain
+usable headlessly (`./run.bat`, `./start.bat`, `python -m src.highlight_engine`). Two extra
+frontends meant three settings files and controls that wrote to a config nothing read — one
+UI, one config, is the contract now.
 
 ### 🎬 Khmer AI Content Studio (new)
 
@@ -45,10 +50,10 @@ Kokoro-82M TTS weights, creates the venv, and offers two optional extras:
 Then start the studio:
 
 ```bash
-./venv/bin/python -m uvicorn ai_creator.app:app --host 0.0.0.0 --port 8000
+./venv/bin/python -m ai_studio            # or --port 8010, --demo, --check
 ```
 
-Open **http://localhost:8000**.
+Open **http://localhost:8000** — that single page is the whole studio.
 
 > **Windows:** install ffmpeg (scoop/choco), Ollama from ollama.com, create the venv,
 > `pip install -r requirements-dev.txt`, then run the same uvicorn command.
@@ -142,9 +147,10 @@ ai_creator/            # earlier studio
   animation.py         # entry/exit/idle/talk-pulse transforms
   transitions.py       # fade/slide/zoom/wipe blending
   renderer.py          # scene composer + audio mixer + final encode
-  templates/, static/  # the studio UI
-src/                   # legacy Auto-Clip Engine (unchanged)
-tests/                 # pytest suite (all three projects)
+  sfx.py, image_search.py, voice.py   # engines the studio calls (their old web page is gone)
+src/                   # Auto-Clip engine library (highlight_engine, video_cropper,
+                       #   caption_generator, voiceover_engine) — no UI of its own
+tests/                 # pytest suite + tests/ui_clickflow (a real browser walkthrough)
 ```
 
 **Privacy:** everything runs on your machine — Ollama LLMs, Kokoro/XTTS TTS,
@@ -160,9 +166,16 @@ shorts with face tracking, local Whisper transcription, LLM re-ranking, Kokoro
 narration and animated captions.
 
 ## Run it
+There is no separate page any more: open the studio and press **⌘C** (or click
+*✂️ Clip a video* in the rail) — upload a long video, pick the highlights, choose a
+crop/caption style and export; the job progress, the analysed clip list and the exported
+files all come from the same server, so a clip render also shows up in History.
+
+Headless, if you want it that way:
 ```bash
-./setup.sh    # one-command setup (ffmpeg check, Ollama model, MediaPipe/Kokoro weights, venv)
-./venv/bin/python -m uvicorn src.app:app --host 0.0.0.0 --port 8001 --reload
+./setup.sh                    # ffmpeg check, Ollama model, MediaPipe/Kokoro weights, venv
+./run.bat videos out          # or: python -m src.highlight_engine / video_cropper / caption_generator
+python -m src.highlight_engine --selftest
 ```
 
 ## Manual installation (Windows / fallback)
