@@ -21,9 +21,11 @@ import time
 
 from fastapi import (APIRouter, Body, Depends, File, Form, HTTPException, Query, Request,
                      UploadFile, WebSocket, WebSocketDisconnect)
+from fastapi import Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 
 from . import __version__, config as cfg_mod, content as content_mod, khmer, media, style as style_mod
+from . import backgrounds as bg_mod
 from . import vram as vram_mod
 from .engines import tts as tts_engine
 from .db import Database
@@ -241,6 +243,14 @@ async def api_update_project(project_id: str, payload: dict = Body(...)):
             return out
 
         merged = _merge(base, payload["settings"] or {})
+        if "background" in merged:
+            # A half-configured background (type chosen, no file/prompt yet) must not
+            # be stored as if it were a decision: the render would fall back to the
+            # studio and the panel would still show the tile as selected.
+            ok, val = bg_mod.validate(merged.get("background"))
+            if not ok:
+                raise HTTPException(400, val)
+            merged["background"] = val
         if "captions" in merged:
             from . import captions as cap
             cap_style, _cap_issues = cap.validate_style(merged.get("captions") or {})
@@ -359,56 +369,117 @@ async def api_scenes(project_id: str):
 @router.post("/projects/{project_id}/scenes")
 async def api_save_scenes(project_id: str, payload: dict = Body(...)):
     """The editable storyboard. Text edits are allowed (Director is senior) and
-    re-verified against the locked script if the scene list no longer matches."""
+    re-verified against the locked script if the scene list no longer matches.
+
+    Contract for the manual (MANUAL Override) workflow, which is the only writer
+    here: whatever the board shows is what gets stored. `scene.meta` is kept in
+    full — the renderers read visual_source, render_mode, character_action, prop,
+    emotion_style and meme_type from it — and anything the studio cannot render is
+    a 400 that names the scene and the fix, never a silent rewrite.
+    """
     st = get_state()
     proj = st.db.get_project(project_id)
     if not proj:
         raise HTTPException(404, "project not found")
     scenes = payload.get("scenes") or []
+    if not isinstance(scenes, list):
+        raise HTTPException(400, "body must be {\"scenes\": [...]}")
     clean = []
-    for s in scenes:
-        text = khmer.normalize_block(s.get("text") or "")
+    for n, s in enumerate(scenes, start=1):
+        where = f"scene {n}"
+        if not isinstance(s, dict):
+            raise HTTPException(400, f"{where}: expected an object, got {type(s).__name__}")
+        text = khmer.normalize_block(str(s.get("text") or ""))
         if not text:
-            continue
-        meta = dict(s.get("meta") or {})
-        visual_source = str(meta.get("visual_source") or "generated_video")
-        if visual_source not in ("generated_video", "illustration", "character_demo"):
-            visual_source = "generated_video"
+            # A blank row on the board is a scene the Director is still writing,
+            # not a deletion: dropping it silently meant "+ add scene" followed by
+            # a save habitually ate the rows. Name it and let them fix it.
+            raise HTTPException(400, f"{where} has no narration — fill it in, or remove the "
+                                     "row with ✕ (an empty scene renders as silence)")
+        raw_meta = s.get("meta") or {}
+        if not isinstance(raw_meta, dict):
+            raise HTTPException(400, f"{where}: meta must be an object")
+        meta = dict(raw_meta)
+        # `list_scenes` flattens a scene whose meta_json wrapped its own meta key
+        # (a quirk of replace_scenes packing every extra key in there), so the
+        # echoed-back board carries a redundant nested copy. Drop it here instead of
+        # letting every project grow one permanently.
+        meta.pop("meta", None)
+        # Validate, and refuse out loud: the old code computed a whitelisted
+        # fallback for visual_source/render_mode and then threw it away, storing
+        # whatever the client sent — so "spinning" or a typo'd source reached Stage 4
+        # untouched, and the failure showed up scenes later as a deferred/blank shot.
+        visual_source = str(meta.get("visual_source") or "")
+        if visual_source and visual_source not in content_mod.VISUAL_SOURCES:
+            raise HTTPException(
+                400, f"{where}: visual_source '{visual_source}' is not a source the studio can "
+                     f"render — pick one of {', '.join(content_mod.VISUAL_SOURCES)}")
         render_mode = str(meta.get("render_mode") or "broll")
-        if render_mode not in ("broll", "talking_head"):
-            render_mode = "broll"
-        if render_mode == "talking_head" and not (meta.get("character_id")
-                                                  or proj.get("character_id")):
-            raise HTTPException(400, "render_mode 'talking_head' needs a character on the project "
-                                     "or this scene")
-        if visual_source == "character_demo" and not (meta.get("character_id")
-                                                      or proj.get("character_id")):
-            raise HTTPException(400, "visual_source 'character_demo' needs a character on the "
-                                     "project or this scene — choose video or illustration")
-        if "character_id" in meta and meta.get("character_id"):
-            if not st.db.get_character(meta["character_id"]):
-                raise HTTPException(400, f"scene {len(clean) + 1}: unknown character_id")
+        if render_mode not in content_mod.RENDER_MODES:
+            raise HTTPException(400, f"{where}: render_mode '{render_mode}' must be "
+                                     f"{', '.join(content_mod.RENDER_MODES)}")
+        # Backgrounds are validated exactly like the other vocabularies — and then
+        # stored verbatim, because {"type":"gradient","a":…,"b":…} *is* the value.
+        if meta.get("background"):
+            ok_bg, bg_val = bg_mod.validate(meta["background"])
+            if not ok_bg:
+                raise HTTPException(400, f"{where}: {bg_val}")
+            if bg_val:
+                meta["background"] = bg_val
+            else:
+                meta.pop("background", None)
+        if "disabled" in meta:
+            meta["disabled"] = bool(meta["disabled"])
+        has_char = bool(meta.get("character_id") or proj.get("character_id"))
+        if not has_char and (render_mode == "talking_head" or visual_source == "character_demo"):
+            what = ("render_mode 'talking_head'" if render_mode == "talking_head"
+                    else "visual_source 'character_demo'")
+            raise HTTPException(400, f"{where}: {what} needs a character — add one under "
+                                     "🧑 Characters and pick it on the project (or set "
+                                     "character_action/illustration for this scene)")
+        if meta.get("character_id") and not st.db.get_character(meta["character_id"]):
+            raise HTTPException(400, f"{where}: character_id '{meta['character_id']}' is not a "
+                                     "saved character — choose one under 🧑 Characters")
+        meta["render_mode"] = render_mode
+
+        def num(key, lo=0.0, hi=600.0):
+            """A board cell can hold "" or a stray string; that is a 400 with the
+            field name, not a 500 traceback out of float()."""
+            raw = s.get(key)
+            try:
+                val = 0.0 if raw in (None, "") else float(raw)
+            except (TypeError, ValueError):
+                raise HTTPException(400, f"{where}: {key} must be a number of seconds "
+                                         f"(got {raw!r})")
+            return max(lo, min(hi, round(val, 3)))
+
         clean.append({"text": text,
-                      "visual_prompt": khmer.clip_clusters((s.get("visual_prompt") or "").strip(), 600),
-                      "mood_tag": khmer.clip_clusters((s.get("mood_tag") or "").strip(), 40),
-                      "estimated_duration_sec": float(s.get("estimated_duration_sec") or 0),
-                      "audio_duration": float(s.get("audio_duration") or 0),
-                      "sfx_prompt": khmer.clip_clusters((s.get("sfx_prompt") or "").strip(), 300),
-                      "meta": {k: v for k, v in meta.items()
-                               if k in ("visual_source", "render_mode", "character_id", "side")}})
+                      "visual_prompt": khmer.clip_clusters(str(s.get("visual_prompt") or "").strip(), 600),
+                      "mood_tag": khmer.clip_clusters(str(s.get("mood_tag") or "").strip(), 40),
+                      "estimated_duration_sec": num("estimated_duration_sec", 0.0, 600.0),
+                      "audio_duration": num("audio_duration", 0.0, 600.0),
+                      "sfx_prompt": khmer.clip_clusters(str(s.get("sfx_prompt") or "").strip(), 300),
+                      # every meta key is kept (nothing here filters): action, prop,
+                      # emotion, meme_type and the stage-written keys all have to
+                      # survive the save for the board to mean anything
+                      "meta": meta})
     if not clean:
-        raise HTTPException(400, "no usable scenes")
+        raise HTTPException(400, "the board is empty — add a scene (\"+ add scene\") or paste a "
+                                 "script (\"⤓ import script\") first")
     st.db.replace_scenes(project_id, clean)
     write_json(os.path.join(st.data_root, "projects", project_id, "02_scenes.json"),
                {"engine": "director-board", "scenes": clean})
-    note = "storyboard saved"
+    saved = st.db.get_project(project_id)
+    note = f"storyboard saved · {len(clean)} scene(s)"
     if (proj.get("mode") or "A").upper() == "A":
         ok = khmer.equal_text(khmer.join_sentences([s["text"] for s in clean]), proj["script"])
         note += " · wording matches the Director's script" if ok else \
                 " · ⚠ wording now differs from the original paste"
+    # scenes + project come back so the board can adopt what was actually stored
+    # (idx renumbered, meta normalised) without refetching the whole project
     return {"scenes": st.db.list_scenes(project_id), "note": note,
-            "integrity": _integrity_report(st.db.get_project(project_id),
-                                           st.db.list_scenes(project_id))}
+            "project": {k: v for k, v in saved.items() if k != "scenes"},
+            "integrity": _integrity_report(saved, st.db.list_scenes(project_id))}
 
 
 # ============================================================== idea (Mode B)
@@ -472,11 +543,32 @@ async def api_start_run(project_id: str, payload: dict = Body(default={})):
     if not (proj.get("script") or "").strip():
         raise HTTPException(400, "no script yet — paste one (Mode A) or generate one (Mode B)")
     trigger = str(payload.get("trigger") or "new")
+    # The Manual Control Panel's two selectors. Both are validated here so a typo
+    # is a 400 that says what to fix — never a run that quietly did less work.
+    skip_stages = [str(x) for x in (payload.get("skip_stages") or [])]
+    bad = [x for x in skip_stages if x not in stagespec.STAGE_BY_KEY]
+    if bad:
+        raise HTTPException(400, f"unknown stage(s) {', '.join(bad)} — the pipeline has "
+                                f"{', '.join(stagespec.ORDER)}")
+    try:
+        skip_scenes = sorted({int(x) for x in (payload.get("skip_scenes") or [])})
+    except (TypeError, ValueError):
+        raise HTTPException(400, "skip_scenes must be a list of scene numbers (0-based indexes)")
+    board = st.db.list_scenes(project_id) or []
+    out_of_range = [i for i in skip_scenes if not 0 <= i < len(board)]
+    if out_of_range:
+        raise HTTPException(400, f"scene(s) {', '.join(str(i) for i in out_of_range)} do not exist — "
+                                f"this board has {len(board)} scene(s), numbered "
+                                f"0-{max(0, len(board) - 1)}")
     out = await st.scheduler.start_run(
         project_id, trigger=trigger,
         resume_from=payload.get("resume_from") or "",
         force_stages=payload.get("force_stages") or None,
+        skip_stages=skip_stages, skip_scenes=skip_scenes,
         auto_start=not bool(payload.get("queue_only")))
+    if skip_stages or skip_scenes:
+        out["skipped_stages"] = skip_stages
+        out["skipped_scenes"] = skip_scenes
     st.db.update_project(project_id, status="rendering", last_run_id=out["run_id"])
     return out
 
@@ -504,7 +596,8 @@ async def api_run_status(run_id: str, since: int = 0):
     if not s:
         raise HTTPException(404, "run not found")
     events = st.db.list_events(run_id, limit=200, after_id=since)
-    return {**s, "events": events, "last_event_id": max([e["id"] for e in events] or [since])}
+    return {**s, "events": events, "last_event_id": max([e["id"] for e in events] or [since]),
+            "eta": _run_eta(s)}
 
 
 @router.post("/runs/{run_id}/cancel")
@@ -543,6 +636,176 @@ async def api_run_continue(run_id: str):
     return await st.scheduler.start_run(run["project_id"], trigger="resume", resume_from=run_id)
 
 
+def _run_eta(status):
+    """Seconds left on a live run, from the work it has already done.
+
+    Deliberately arithmetic the user can check: completed jobs × the mean wall
+    time of those same jobs. It reports `confidence` (how many samples back that
+    up) and stays null until there is anything to measure, so the UI never shows
+    a made-up countdown.
+    """
+    rows = (status or {}).get("stages") or []
+    active = [r for r in rows if r.get("status") in ("running", "queued", "blocked", "pending")]
+    done = [r for r in rows if r.get("status") in ("done", "skipped", "failed")
+            and r.get("started_at") and r.get("finished_at")]
+    out = {"remaining_jobs": len(active), "measured_jobs": len(done), "seconds": None,
+           "confidence": "none", "scene": None, "scene_total": None}
+    if not done:
+        return out
+    secs = [float(r["finished_at"]) - float(r["started_at"]) for r in done]
+    avg = sum(secs) / len(secs)
+    if not active:
+        out.update({"seconds": 0.0, "confidence": "measured" if len(done) > 2 else "low",
+                    "measured_jobs": len(done)})
+        return out
+    # concurrency: jobs run in parallel per resource, so divide by how many were
+    # in flight on average (measured from the same rows, not guessed)
+    out.update({"seconds": round(max(1.0, avg * len(active) / max(1.0, _avg_width(done))), 1),
+                "confidence": "measured" if len(done) >= 8 else ("fair" if len(done) >= 3 else "low"),
+                "avg_job_seconds": round(avg, 2)})
+    run = (status or {}).get("run") or {}
+    scenes = [r.get("scene_idx") for r in active if r.get("scene_idx") is not None]
+    out["scene"] = (min(scenes) if scenes else None)
+    out["scene_total"] = (max([r.get("scene_idx") for r in rows if r.get("scene_idx") is not None]
+                              or [None]))
+    return out
+
+
+def _avg_width(rows):
+    """Average simultaneous in-flight jobs, from the same rows ETA uses."""
+    spans = [(float(r["started_at"]), float(r["finished_at"])) for r in rows
+             if r.get("started_at") and r.get("finished_at")]
+    if len(spans) < 2:
+        return 1.0
+    marks = sorted([(t, 1) for t, _ in spans] + [(e, -1) for _, e in spans])
+    depth = peak = total = 0
+    for _t, d in marks:
+        depth += d
+        peak = max(peak, depth)
+        total += depth
+    return max(1.0, total / float(len(marks)))
+
+
+@router.post("/runs/{run_id}/skip_scene")
+async def api_run_skip_scene(run_id: str, payload: dict = Body(...)):
+    """Drop one scene from everything a live run has not started yet."""
+    st = get_state()
+    if "scene_idx" not in payload:
+        raise HTTPException(400, "scene_idx is required (0-based scene number)")
+    try:
+        idx = int(payload["scene_idx"])
+    except (TypeError, ValueError):
+        raise HTTPException(400, f"scene_idx must be a number, got {payload['scene_idx']!r}")
+    out = st.scheduler.skip_scene_now(run_id, idx)
+    if not out.get("ok"):
+        raise HTTPException(409, out.get("reason") or "that scene could not be skipped")
+    return out
+
+
+@router.get("/projects/{project_id}/run-plan")
+async def api_run_plan(project_id: str, skip_stages: str = "", skip_scenes: str = ""):
+    """Pre-run summary for the Manual Control Panel: cost, skips, warnings.
+
+    Computed from the graph the scheduler is about to build, so the numbers in the
+    modal describe the run that will happen rather than a re-derivation of it.
+    """
+    st = get_state()
+    proj = st.db.get_project(project_id)
+    if not proj:
+        raise HTTPException(404, "project not found")
+
+    def _csv(v):
+        return [x for x in str(v or "").replace(" ", ",").split(",") if x != ""]
+
+    wanted = _csv(skip_stages)
+    bad_stages = [x for x in wanted if x not in stagespec.STAGE_BY_KEY]
+    if bad_stages:
+        raise HTTPException(400, f"unknown stage(s) {', '.join(bad_stages)} — the pipeline has "
+                                f"{', '.join(stagespec.ORDER)}")
+    board = st.db.list_scenes(project_id) or []
+    try:
+        off = sorted({int(x) for x in _csv(skip_scenes)})
+    except ValueError:
+        raise HTTPException(400, "skip_scenes must be comma-separated scene numbers")
+    disabled = sorted(int(sc["idx"]) for sc in board if (sc.get("meta") or {}).get("disabled"))
+    skipped = sorted(set(off) | set(disabled))
+    unknown = [i for i in skipped if not 0 <= i < len(board)]
+    if unknown:
+        raise HTTPException(400, f"scene(s) {', '.join(str(i) for i in unknown)} do not exist — "
+                                f"this board has {len(board)} scene(s), numbered "
+                                f"0-{max(0, len(board) - 1)}")
+    cfg, plan = st.scheduler.resolved(proj.get("settings") or {})
+    graph_jobs, _ = stagespec.build_graph(max(1, len(board)), plan=plan, cfg=cfg)
+    kept = {k: j for k, j in graph_jobs.items()
+            if j.stage not in wanted and (j.scene_idx is None or j.scene_idx not in skipped)}
+    included = [sc for sc in board if sc["idx"] not in skipped]
+    total = round(sum(float(sc.get("estimated_duration_sec") or 4.0) for sc in included), 2)
+    hist = _recent_scene_seconds(st)
+    engines = {k: (v or {}).get("engine") for k, v in (plan or {}).items() if isinstance(v, dict)}
+    warn = []
+    if engines.get("tts") in ("placeholder", None, ""):
+        warn.append("voice: placeholder beeps, not speech — pick ⚡ Edge-TTS or install sherpa-onnx "
+                    "under 🎙 Voices")
+    if engines.get("video") == "previz":
+        warn.append("video: CPU previz draft (shapes over your background), not AI frames")
+    if (plan or {}).get("hardware", {}).get("profile") == "machine_b":
+        warn.append("this is machine B (CPU): GPU stages defer and finish with the catch-up run")
+    if not (proj.get("script") or "").strip():
+        warn.append("no script yet — the run stops after the script stage")
+    if not board:
+        warn.append('the board is empty — add a scene ("+ add scene") or paste a script '
+                    '("⤓ import script") first')
+    bgs = {}
+    for sc in board:
+        raw = (sc.get("meta") or {}).get("background") or (proj.get("settings") or {}).get("background")
+        if raw:
+            lab = bg_mod.label(raw)
+            bgs[lab] = bgs.get(lab, 0) + 1
+    return {
+        "project_id": project_id,
+        "scenes_total": len(board), "scenes_rendering": len(included), "scenes_skipped": skipped,
+        "stages_skipped": wanted, "stages_running": sorted({j.stage for j in kept.values()}),
+        "jobs": len(kept), "jobs_total": len(graph_jobs),
+        "estimated_seconds": total,
+        "estimated_eta_seconds": round(hist * len(included), 1) if hist else None,
+        "estimate_basis": (f"measured on this machine ({hist:.1f}s per scene over recent runs)"
+                           if hist else "sum of the board's per-scene durations"),
+        "estimated_size_bytes": int(total * 1400 * 1000 / 8),
+        "resolution": f"{cfg['video'].get('width')}x{cfg['video'].get('height')}@"
+                      f"{cfg['video'].get('fps')}",
+        "engines": engines,
+        "backgrounds": [{"label": k, "scenes": v} for k, v in bgs.items()],
+        "captions": bool((proj.get("settings") or {}).get("burn_captions", True)),
+        "warnings": warn,
+    }
+
+
+def _recent_scene_seconds(st):
+    """Median wall-clock seconds per scene from finished runs, or None.
+
+    The ETA is only as honest as this sample: no history, no promise.
+    """
+    try:
+        runs = st.db.list_runs(limit=8)
+    except Exception:
+        return None
+    samples = []
+    for r in runs:
+        if r.get("status") != "completed" or not r.get("started_at") or not r.get("finished_at"):
+            continue
+        try:
+            rows = st.db.list_stages(r["id"])
+        except Exception:
+            continue
+        n = len({row.get("scene_idx") for row in rows if row.get("scene_idx") is not None})
+        if n:
+            samples.append(max(0.5, (float(r["finished_at"]) - float(r["started_at"])) / float(n)))
+    if not samples:
+        return None
+    samples.sort()
+    return samples[len(samples) // 2]
+
+
 @router.post("/runs/{run_id}/stages/{stage}/regenerate")
 async def api_stage_regenerate(run_id: str, stage: str, payload: dict = Body(default={})):
     """Re-run ONE stage (and everything downstream) without redoing the rest.
@@ -574,7 +837,8 @@ async def api_stage_regenerate(run_id: str, stage: str, payload: dict = Body(def
         settings = dict(proj.get("settings") or {})
         settings.setdefault("pipeline", {})["require_qa_pass"] = False
         st.db.update_project(pid, settings=settings)
-    out = await st.scheduler.rerun_stage(run_id, stage, project_id=pid)
+    out = await st.scheduler.rerun_stage(run_id, stage, project_id=pid,
+                                         scene_idx=scene_idx)
     st.bus.publish("stage_regenerate", {"stage": stage, "scene_idx": scene_idx,
                                        "new_run": out["run_id"], "overrides": overrides},
                   run_id=out["run_id"], project_id=pid, stage=stage,
@@ -640,16 +904,433 @@ async def api_scene_bundle(run_id: str, idx: int):
 
 
 # ==================================================================== assets
+_ASSET_CACHE: dict = {}
+
+
 @router.get("/assets")
-async def api_assets(project_id: str = "", kind: str = "", limit: int = 400):
+async def api_assets(project_id: str = "", kind: str = "", limit: int = 0, page: int = 1,
+                     page_size: int = 50, run_id: str = ""):
+    """One page of the asset table (default 50), newest first.
+
+    A finished run registers a couple of hundred rows per project, so this used to
+    hand the browser all of them on every poll. `total`/`has_more` let the UI show a
+    real pager, and the 60 s cache is keyed on the row count + newest insert, so an
+    asset that lands mid-cache invalidates it instead of hiding for a minute.
+    """
     st = get_state()
+    ps = max(1, min(500, int(page_size or 50)))
+    per_call = max(1, min(500, int(limit))) if limit else ps
+    pg = max(1, int(page or 1))
+    off = (pg - 1) * per_call
+
+    try:
+        gen = st.db.one("SELECT COUNT(*) AS n, COALESCE(MAX(created_at), 0) AS c FROM assets") or {}
+        gkey = (gen.get("n"), gen.get("c"))
+    except Exception:
+        gkey = None
+    key = ("assets", project_id, run_id, kind, pg, per_call)
+    hit = _ASSET_CACHE.get(key)
+    if gkey is not None and hit and hit[0] == gkey and time.time() - hit[1] < 60.0:
+        return dict(hit[2], cached=True)
+
     rows = st.db.list_assets(project_id=project_id or None, kind=kind or None,
-                            limit=min(2000, max(1, limit)))
+                            limit=per_call, offset=off)
     for r in rows:
         r["url"] = f"/api/assets/{r['id']}/stream"
         r["download"] = f"/api/assets/{r['id']}/download"
         r["size_human"] = human_size(r.get("size_bytes") or 0)
-    return {"assets": rows}
+    total = st.db.count_assets(project_id=project_id or None, kind=kind or None,
+                              run_id=run_id or None)
+    out = {"assets": rows, "total": total, "page": pg, "page_size": per_call,
+           "pages": max(1, -(-total // per_call)), "has_more": off + len(rows) < total,
+           "cached": False}
+    if gkey is not None:
+        if len(_ASSET_CACHE) > 64:
+            _ASSET_CACHE.clear()
+        _ASSET_CACHE[key] = (gkey, time.time(), out)
+    return out
+
+
+# ─────────────────────────────────────────────────────────── backgrounds (Stage 4)
+@router.get("/backgrounds")
+async def api_backgrounds(project_id: str = ""):
+    """The background catalog: types, their inputs, and what this project chose.
+
+    The picker renders this verbatim — nothing about background vocabulary is
+    duplicated in the frontend, so a new type is one dict in `backgrounds.py`.
+    """
+    st = get_state()
+    out = bg_mod.catalog()
+    out["scenes"] = []
+    if project_id:
+        proj = st.db.get_project(project_id)
+        if proj:
+            out["project"] = bg_mod.normalize((proj.get("settings") or {}).get("background"))
+            for sc in (st.db.list_scenes(project_id) or []):
+                raw = (sc.get("meta") or {}).get("background")
+                out["scenes"].append({"idx": sc["idx"], "background": bg_mod.normalize(raw),
+                                      "override": bool(raw)})
+    return out
+
+
+@router.get("/backgrounds/preview")
+async def api_background_preview(type: str = "", template: str = "", a: str = "", b: str = "",
+                                 width: int = 220, height: int = 392):
+    """A rendered still of the plate, so the picker shows the real thing.
+
+    These are generated by the same code path that renders the video, which is the
+    point: a swatch drawn from a CSS gradient would not tell you what the studio
+    key light does to your captions.
+    """
+    from fastapi.responses import Response
+
+    spec = {"type": type or "white_studio"}
+    if template:
+        spec["template"] = template
+    if a:
+        spec["a"] = a
+    if b:
+        spec["b"] = b
+    ok, val = bg_mod.validate(spec)
+    if not ok:
+        raise HTTPException(400, val)
+    w = max(64, min(720, int(width or 220)))
+    h = max(64, min(1280, int(height or 392)))
+    try:
+        png = bg_mod.preview_png(val, width=w, height=h, data_root=get_state().data_root)
+    except Exception as e:
+        raise HTTPException(500, f"background preview could not be rendered: {type(e).__name__}: {e}")
+    return Response(content=png, media_type="image/png",
+                    headers={"Cache-Control": "public, max-age=3600"})
+
+
+@router.post("/backgrounds/upload")
+async def api_background_upload(file: UploadFile = File(...), project_id: str = Form("")):
+    """Store a background plate under the data dir and hand back its reference.
+
+    The path is relative on purpose: settings and scene meta move between machines
+    with the project, and an absolute Windows path in a stored board is how plates
+    break after a copy.
+    """
+    st = get_state()
+    name = os.path.basename(file.filename or "plate.png")
+    stem, ext = os.path.splitext(name)
+    ext = ext.lower()
+    if ext not in (".png", ".jpg", ".jpeg", ".webp"):
+        raise HTTPException(400, f"'{ext or name}' is not a background image — use PNG, JPG or "
+                                f"WEBP (a video cannot be a plate)")
+    d = ensure_dir(os.path.join(st.data_root, "backgrounds"))
+    raw = await file.read()
+    if len(raw) > 24 * 1024 * 1024:
+        raise HTTPException(413, f"that image is {len(raw) // (1024 * 1024)} MB — keep plates "
+                                f"under 24 MB (they are resized to your render resolution anyway)")
+    if not raw:
+        raise HTTPException(400, "the uploaded file is empty")
+    from PIL import Image
+    import io as _io
+
+    try:
+        im = Image.open(_io.BytesIO(raw))
+        im.verify()
+        size = Image.open(_io.BytesIO(raw)).size
+    except Exception as e:
+        raise HTTPException(400, f"'{name}' is not a readable image ({str(e)[:80]})")
+    h = int(1000000 * (hash((name, len(raw))) % 4096))
+    dst = os.path.join(d, f"bg_{h:06d}{ext}")
+    with open(dst, "wb") as f:
+        f.write(raw)
+    rel = os.path.relpath(dst, st.data_root).replace(os.sep, "/")
+    return {"path": rel, "name": name, "width": size[0], "height": size[1],
+            "background": {"type": "image", "path": rel},
+            "note": f"saved · {size[0]}x{size[1]} · will be cover-cropped to the render size"}
+
+
+# ─────────────────────── clips · image search · sfx (one server) ───────────────────
+# These three surfaces used to live on two other web apps (:8001 Auto-Clip
+# dashboard, :8002 AI Creator page). Those pages are deleted; the engines behind
+# them are kept and are reached through the studio API, so there is exactly one UI
+# and no feature that only existed somewhere else.
+
+_CLIPS_ENGINES: dict = {}
+
+
+def _clip_engine():
+    """One ClipEngine per data root (tests use temp roots; prod uses data/studio)."""
+    st = get_state()
+    eng = _CLIPS_ENGINES.get(st.data_root)
+    if eng is None:
+        from . import clips as clips_mod
+        eng = _CLIPS_ENGINES.setdefault(st.data_root, clips_mod.ClipEngine(st.data_root))
+    return eng
+
+
+def _clip_llm_options() -> dict:
+    """The analyzer's LLM step uses the STUDIO's own Ollama settings — the legacy
+    dashboard kept a second config.json, and two answers for one machine is how
+    'why did the model change?' bugs start."""
+    cfg = get_state().config()
+    roles = cfg.get("roles") or {}
+    script = roles.get("script") or {}
+    host = (cfg.get("ollama") or {}).get("host") or ""
+    if not script.get("enabled", True) or not host:
+        return {"llm_provider": "Off"}
+    return {"llm_provider": "ollama", "ollama_model": script.get("model") or "",
+            "ollama_host": host}
+
+
+@router.get("/clips")
+async def api_clips():
+    """Everything the clip panel needs at load: capability truth, files, jobs."""
+    from . import clips as clips_mod
+    eng = _clip_engine()
+    return {"engine": clips_mod.availability(os.getcwd()),
+            "videos": eng.list_videos(), "outputs": eng.list_outputs(),
+            "jobs": eng.jobs.list()[:20]}
+
+
+@router.post("/clips/upload")
+async def api_clips_upload(file: UploadFile = File(...)):
+    eng = _clip_engine()
+    raw = await file.read()
+    try:
+        meta = eng.ingest(file.filename or "", raw)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {**meta, "note": f"stored under {os.path.relpath(eng.upload_dir, get_state().data_root)} "
+                            f"in the studio data folder"}
+
+
+@router.get("/clips/source/{name}")
+async def api_clips_source(name: str):
+    eng = _clip_engine()
+    try:
+        path = eng.source_path(name)
+    except (FileNotFoundError, ValueError) as e:
+        raise HTTPException(404, str(e))
+    return _stream_with_range(path, "video/mp4")
+
+
+@router.post("/clips/analyze")
+async def api_clips_analyze(payload: dict = Body(default={})):
+    from . import clips as clips_mod
+    if not clips_mod.availability(os.getcwd())["available"]:
+        raise HTTPException(503, "the clip engine cannot run here: "
+                                f"{', '.join(clips_mod.availability(os.getcwd())['missing'])} "
+                                f"is not installed — {clips_mod.availability(os.getcwd())['install']}")
+    eng = _clip_engine()
+    video = str(payload.get("video") or "")
+    try:
+        jid = eng.analyze(video, top_n=int(payload.get("top_n") or 5),
+                          min_s=int(payload.get("min_seconds") or 15),
+                          max_s=int(payload.get("max_seconds") or 30),
+                          use_whisper=bool(payload.get("use_whisper")),
+                          whisper_model=str(payload.get("whisper_model") or "small"),
+                          llm=_clip_llm_options())
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"job_id": jid}
+
+
+@router.get("/clips/highlights/{name}")
+async def api_clips_highlights(name: str):
+    eng = _clip_engine()
+    try:
+        eng.source_path(name)
+    except (FileNotFoundError, ValueError) as e:
+        raise HTTPException(404, str(e))
+    clips = eng.highlights(name)
+    return {"video": name, "clips": clips,
+            "note": "" if clips else "not analyzed yet — press analyze and the candidate "
+                                     "clips appear here"}
+
+
+@router.post("/clips/export")
+async def api_clips_export(payload: dict = Body(default={})):
+    eng = _clip_engine()
+    try:
+        jid = eng.export(str(payload.get("video") or ""), int(payload.get("index") or 0),
+                        caption_style=str(payload.get("caption_style") or "Reels"),
+                        track_faces=bool(payload.get("track_faces", True)),
+                        voiceover_text=str(payload.get("voiceover_text") or ""),
+                        use_kokoro=bool(payload.get("use_kokoro")),
+                        kokoro_voice=str(payload.get("kokoro_voice") or ""))
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"job_id": jid}
+
+
+@router.get("/clips/jobs/{job_id}")
+async def api_clips_job(job_id: str):
+    j = _clip_engine().jobs.get(job_id)
+    if not j:
+        # jobs live in memory only: after a restart the honest answer is "that job
+        # is gone", not a spinner stuck at its last percentage
+        raise HTTPException(404, "that clip job is not in this server's memory "
+                                 "(it finished before a restart) — check the outputs list")
+    return j
+
+
+@router.get("/clips/file/{name}")
+async def api_clips_file(name: str):
+    eng = _clip_engine()
+    try:
+        path = eng.out_path(name)
+    except (FileNotFoundError, ValueError) as e:
+        raise HTTPException(404, str(e))
+    mime = "audio/x-wav" if path.endswith(".wav") else ("application/x-subrip"
+            if path.endswith(".srt") else "video/mp4")
+    return FileResponse(path, media_type=mime, filename=os.path.basename(path))
+
+
+@router.post("/images/search")
+async def api_image_search(payload: dict = Body(default={})):
+    """Find (or draw) one supporting still for a scene.
+
+    The legacy page's rule is kept: only CC / public-domain results are accepted,
+    and when the web is unreachable the caller is told the image is a locally drawn
+    placeholder — never passed off as a found photo.
+    """
+    st = get_state()
+    query = khmer.clip_clusters(khmer.strip_emoji_and_marks(str(payload.get("query") or "")), 120)
+    if not query:
+        raise HTTPException(400, "an image needs a search phrase")
+    cache = ensure_dir(os.path.join(st.data_root, "image-cache"))
+    try:
+        from ai_creator.image_search import fetch_supporting_image
+    except Exception as e:                                     # noqa: BLE001
+        raise HTTPException(503, f"the image-search engine is not importable here: {e}")
+    res = await asyncio.to_thread(fetch_supporting_image, "web", query, cache)
+    fn = os.path.basename(str((res or {}).get("local_path") or ""))
+    if not fn or not os.path.exists(os.path.join(cache, fn)):
+        return {"found": False, "query": query,
+                "note": "nothing was written — the search could not reach an open-licence "
+                        "source and the placeholder renderer failed"}
+    return {"found": True, "query": query, "file": fn,
+            "url": f"/api/images/cache/{fn}",
+            "source": (res or {}).get("source") or "web",
+            "note": {"web": "Creative-Commons / public-domain result, cached in the studio data dir",
+                     "ai": "no CC hit within the timeout — this is a locally drawn placeholder, "
+                           "not a photograph"}.get((res or {}).get("source") or "", "cached copy")}
+
+
+@router.get("/images/cache/{name}")
+async def api_image_cached(name: str):
+    path = os.path.join(get_state().data_root, "image-cache", os.path.basename(name))
+    if not os.path.isfile(path):
+        raise HTTPException(404, "that cached image is not here (was the data folder cleaned?)")
+    return FileResponse(path, media_type="image/png")
+
+
+@router.get("/sfx")
+async def api_sfx_library():
+    """The shared sound-effects folder, so the browser and the render use one list."""
+    root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sfx_library")
+    try:
+        from ai_creator.sfx import ensure_library, list_sfx
+    except Exception as e:                                     # noqa: BLE001
+        raise HTTPException(503, f"the sfx library is not importable here: {e}")
+    try:
+        ensure_library(root)
+    except Exception:                                          # noqa: BLE001
+        pass
+    rows = list_sfx(root)
+    for r in rows:
+        r["url"] = f"/api/sfx/{r['name']}.wav"
+    return {"dir": root, "sfx": rows}
+
+
+@router.get("/sfx/{name}.wav")
+async def api_sfx_play(name: str):
+    root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sfx_library")
+    try:
+        from ai_creator.sfx import load_sfx
+    except Exception as e:                                     # noqa: BLE001
+        raise HTTPException(503, f"the sfx library is not importable here: {e}")
+    samples, sr = load_sfx(root, os.path.basename(name))
+    if samples is None:
+        raise HTTPException(404, f"no '{name}' in the sfx folder")
+    from .util import wav_bytes
+    return Response(content=wav_bytes(samples, sr=int(sr)), media_type="audio/wav",
+                    headers={"Content-Disposition": f'attachment; filename="{name}.wav"'})
+
+
+_GALLERY_PROBE_CACHE = {}
+
+
+def _gallery_probe(path):
+    """Probe a finished cut, remembering the answer until the file changes.
+
+    The page this endpoint replaced cached its footer label the same way, and the reason is
+    measured rather than stylistic: opening every export with ffprobe on each drawer render
+    made the gallery the slowest screen in the app. The key is (mtime, size), so re-encoding a
+    project re-measures it — a cache that lies about a video is worse than no cache at all.
+    """
+    try:
+        key = (os.path.getmtime(path), os.path.getsize(path))
+    except OSError:
+        return {}
+    hit = _GALLERY_PROBE_CACHE.get(path)
+    if hit and hit[:2] == key:
+        return hit[2]
+    from . import media as media_mod
+    info = media_mod.probe(path)
+    if info.get("probe_used"):
+        _GALLERY_PROBE_CACHE[path] = (key[0], key[1], info)
+    return info
+
+
+@router.get("/gallery")
+async def api_gallery(probe: bool = Query(False), limit: int = Query(60, ge=1, le=200),
+                      project_id: str = Query("")):
+    """Every finished cut on this machine.
+
+    This replaces a hand-written page that showed three named renders and had its
+    own CSS inside `app.py`: a card here can only exist if a run actually registered
+    a `final` asset, and a file that has since been cleaned out of the data folder is
+    labelled `missing` instead of quietly vanishing (a dead <video> is far more
+    useful than a blank page when someone is hunting for their export).
+    """
+    st = get_state()
+    rows = st.db.list_assets(kind="final", project_id=(project_id or None), limit=limit)
+    items, probed = [], 0
+    for a in rows:
+        pid = a["project_id"]
+        proj = st.db.get_project(pid) or {}
+        path = a.get("path") or ""
+        meta = a.get("meta") or {}
+        card = {"asset_id": a["id"], "project_id": pid, "title": proj.get("title") or "(deleted project)",
+                "content_type": proj.get("content_type") or "", "run_id": a.get("run_id") or "",
+                "created_at": a.get("created_at") or 0, "duration": a.get("duration") or 0,
+                "size_bytes": a.get("size_bytes") or 0,
+                "width": meta.get("width"), "height": meta.get("height"),
+                "captions": meta.get("captions") or meta.get("caption_preset") or "",
+                "stream_url": f"/api/assets/{a['id']}/stream",
+                "download_url": f"/api/assets/{a['id']}/download",
+                "poster_url": "", "missing": not os.path.exists(path), "verified": False}
+        post = (st.db.list_assets(project_id=pid, kind="poster", limit=1) or [None])[0]
+        if post:
+            card["poster_url"] = f"/api/assets/{post['id']}/stream"
+        if probe and not card["missing"]:
+            info = _gallery_probe(path)
+            if info.get("probe_used"):
+                card.update({"duration": info.get("duration") or card["duration"],
+                             "width": info.get("width"), "height": info.get("height"),
+                             "fps": info.get("fps"), "has_audio": info.get("has_audio"),
+                             "size_bytes": info.get("size_bytes") or card["size_bytes"],
+                             "verified": True})
+                probed += 1
+        items.append(card)
+    items.sort(key=lambda c: -float(c["created_at"] or 0))
+    return {"items": items, "total": len(items),
+            "from_record": sum(1 for c in items if not c["verified"]),
+            "probed": probed,
+            "note": ("specs come from the render record; ?probe=1 opens each file with ffmpeg and "
+                     "marks it verified (measured files are cached until the file changes)" if not probe else
+                     f"{probed} of {len(items)} files opened and measured by ffmpeg")}
 
 
 def _asset_or_404(asset_id):
@@ -988,7 +1669,33 @@ async def api_voices():
         r["sample_url"] = f"/api/voices/{r['id']}/sample" if r.get("sample_path") else ""
     cfg = st.config()
     discovered = await asyncio.to_thread(_discover_rvc, cfg)
+    from .engines import tts as tts_engine
+
+    avail = tts_engine.available_engines(cfg)
+    try:
+        from .engines.edge_tts_provider import EdgeTTSProvider
+
+        tts_voices = list(EdgeTTSProvider.catalog(available=avail))
+    except Exception as e:                              # package missing → the note says so
+        tts_voices = [{"id": "edge_tts:unavailable", "label": "⚡ Edge-TTS (not installed)",
+                       "provider": "edge_tts", "voice": "", "engine": "edge_tts",
+                       "available": False, "needs_network": True, "emotions": [],
+                       "note": f"pip install edge-tts — {type(e).__name__}"}]
+    if avail.get("sherpa_model") or avail.get("sherpa_python") or avail.get("sherpa_cli"):
+        tts_voices.append({"id": "sherpa:khmer-mms", "label": "🖥️ Sherpa Khmer (offline MMS)",
+                           "provider": "sherpa", "voice": "", "engine": "sherpa",
+                           "available": True, "needs_network": False, "emotions": [],
+                           "note": "runs on this machine, no internet needed"})
+    tts_voices.append({"id": "placeholder:speech-shaped",
+                       "label": "🔈 Placeholder (timing only, not speech)", "provider": "placeholder",
+                       "voice": "", "engine": "placeholder", "available": True, "needs_network": False,
+                       "emotions": [],
+                       "note": "never ship this — it exists so a CPU-only machine can still test "
+                               "the pipeline"})
     return {"voices": rows, "discovered": discovered,
+            "tts_voices": tts_voices,
+            "tts": {"available": avail, "engine": cfg["tts"].get("engine"),
+                    "voice": cfg["tts"].get("voice") or "", "gender": cfg["tts"].get("gender") or "male"},
             "rvc": {"webui_dir": cfg["rvc"].get("webui_dir"), "api_base": cfg["rvc"].get("api_base")}}
 
 
@@ -1383,6 +2090,41 @@ async def api_scene_image_upload(project_id: str, idx: int, image: UploadFile = 
             "note": "custom image saved for this scene (illustration source, generation skipped)"}
 
 
+@router.post("/projects/{project_id}/scenes/{idx}/image-cache")
+async def api_scene_image_from_cache(project_id: str, idx: int, payload: dict = Body(...)):
+    """Use one already-cached image (from /api/images/search) as a scene's still.
+
+    Only files inside ``<data>/image-cache`` are accepted — the studio never fetches
+    a URL a client names, so this cannot be turned into a proxy. The stored result is
+    byte-identical to what the upload route would have written, and the scene's
+    ``visual_source`` flips to illustration so the video stage skips generation.
+    """
+    st = get_state()
+    if not st.db.get_project(project_id):
+        raise HTTPException(404, "project not found")
+    scene = st.db.get_scene(project_id, idx)
+    if not scene:
+        raise HTTPException(404, f"scene {idx} not found")
+    name = os.path.basename(str(payload.get("file") or ""))
+    src = os.path.join(st.data_root, "image-cache", name)
+    if not name or not os.path.isfile(src):
+        raise HTTPException(404, "that cached image is not in this data folder — search again")
+    scene_dir = ensure_dir(os.path.join(st.data_root, "projects", project_id, "scenes",
+                                        f"{int(idx):02d}"))
+    dst = os.path.join(scene_dir, "00_custom.png")
+    try:
+        await asyncio.to_thread(_normalize_image, src, dst)
+    except Exception as e:                                        # noqa: BLE001
+        raise HTTPException(400, f"image could not be processed: {str(e)[:160]}")
+    meta = dict(scene.get("meta") or {})
+    meta["visual_source"] = "illustration"
+    meta["image_origin"] = f"image-search:{name}"
+    _set_scene_meta(st.db, project_id, idx, meta)
+    return {"ok": True, "scene": st.db.get_scene(project_id, idx),
+            "url": f"/api/files?path={os.path.abspath(dst)}",
+            "note": "scene still set from the cached image — generation is skipped for this scene"}
+
+
 @router.delete("/projects/{project_id}/scenes/{idx}/image")
 async def api_scene_image_delete(project_id: str, idx: int):
     st = get_state()
@@ -1461,23 +2203,73 @@ async def api_tts_providers_and_styles():
     st = get_state()
     from . import tts_providers as tp
     return {
-        "providers": tp.list_providers(st.cfg if st else {}),
+        # StudioState exposes config(), not a .cfg attribute — `st.cfg` raised
+        # AttributeError on every call to this endpoint.
+        "providers": tp.list_providers(st.config() if st else {}),
         "emotional_styles": tp.list_emotional_styles(),
     }
+
+
+def _project_qa_payload(st, project_id: str) -> dict:
+    """The QA gate for one project — one implementation, one shape of answer.
+
+    Two contracts this used to break, both visible from the UI:
+
+    * a project with no scenes was a **404**, because `final_video()` returns ""
+      until a run finishes — so opening any draft threw a red "Project or scenes
+      not found" toast at a user who had done nothing wrong, and the panel died on
+      `undefined.some()`. It is now a 200 with `pending: true`, a `message` naming
+      what is missing, and every array present but empty;
+    * a project with scenes but no render used to be told to "check the render
+      first" *before the render had run*, and the gate reported `mp4_checked:
+      True` for a file nobody opened. The gate now always audits what exists, and
+      `mp4_checked` means the container was actually parsed (see media.probe).
+
+    So "never rendered", "rendered but the file is gone" and "rendered and broken"
+    are three different, each actionable, answers.
+    """
+    from . import qa as qa_engine
+    from .qa import final_dimensions
+
+    proj = st.db.get_project(project_id)
+    scenes = st.db.list_scenes(project_id)
+    ct = content_mod.normalize(proj.get("content_type")
+                               or (proj.get("settings") or {}).get("content_type")
+                               or "explainer")
+    final_mp4 = st.final_video(project_id)
+    if not scenes:
+        script = (proj.get("script") or "").strip()
+        need = ("no scenes yet — run Stage 1 (Breakdown), or write them on the Scene board"
+                if script else "no script yet — paste one (Script panel) or generate an idea, "
+                               "then run the pipeline")
+        return {"project_id": project_id, "content_type": ct, "pending": True,
+                "message": f"Nothing to audit yet: {need}. The gate checks Khmer clusters, hook "
+                           "pacing, voice levels and the final MP4 container.",
+                "checked": 0, "approved": False, "fail_count": 0, "warn_count": 0,
+                "failures": [], "warnings": [], "total_scenes": 0,
+                "estimated_duration": 0.0, "final_mp4": final_mp4,
+                "mp4_checked": False, "mp4_verified": False}
+    _set = proj.get("settings") or {}
+    res = qa_engine.run_full_project_qa(scenes, final_mp4, content_type=ct,
+                                        target_dimensions=final_dimensions(_set),
+                                        captions_burned=bool(_set.get("burn_captions", True)))
+    if not final_mp4:
+        res["message"] = ("the script and scenes were audited; the export was not — this project "
+                          "has no rendered video yet. Run Studio (or resume from Assemble) to "
+                          "audit the container itself.")
+    res["pending"] = False
+    res["project_id"] = project_id
+    res["content_type"] = ct
+    res["checked"] = len(res.get("failures") or []) + len(res.get("warnings") or [])
+    return res
 
 
 @router.get("/qa/project/{project_id}")
 async def api_qa_project(project_id: str):
     st = get_state()
-    scenes = st.db.list_scenes(project_id)
-    if not scenes:
-        raise HTTPException(status_code=404, detail="Project or scenes not found")
-
-    from . import qa as qa_engine
-    final_mp4 = st.final_video(project_id) if hasattr(st, "final_video") else None
-    ct = st.db.get_project(project_id).get("settings", {}).get("content_type", "explainer")
-    res = qa_engine.run_full_project_qa(scenes, final_mp4, content_type=ct)
-    return res
+    if not st.db.get_project(project_id):
+        raise HTTPException(status_code=404, detail="project not found")
+    return _project_qa_payload(st, project_id)
 
 
 # ============================================================ style previews

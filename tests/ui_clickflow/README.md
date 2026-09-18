@@ -1,0 +1,57 @@
+# `tests/ui_clickflow` — the manual workflow, clicked
+
+`pytest` proves the API. This proves the **page**: it boots the real React app
+(`ai_studio/frontend/src/main.tsx` → `App` → `Wizard` → `ProjectView` →
+`SceneBoard`) in jsdom against a **live studio server**, then clicks what a
+manual user clicks and asserts what the DOM shows afterwards.
+
+```bash
+./tests/ui_clickflow/run.sh          # 61 checks, ~50s, temp dir only
+PYTHON=/path/to/studio-env/bin/python ./tests/ui_clickflow/run.sh   # non-default python
+```
+
+Exit code 0 = every check passed. Nothing is written inside the repo (bundle,
+data dir and `node_modules/jsdom` go to a temp dir that is removed on exit).
+
+## What it drives
+
+| # | clicks | asserts |
+|---|--------|---------|
+| 1–5 | `+ New project` → **MANUAL (Creative Override)** → 5× `Continue →` → paste a 15-line Khmer script → `Create Project & Launch Studio` | wizard works, lands on `#/project/<id>` |
+| 6–8 | look at the board | an empty project offers `+ add scene` / `⤓ import script`, and `+ add scene` appends editable rows marked `· unsaved` |
+| 9–10 | type narration; blank one row | typing never hits the network; an unfinished row holds the autosave back instead of error-spamming |
+| 11–13 | 4 picker changes in one burst | one coalesced `POST /scenes` (200), board leaves “unsaved” |
+| 14 | `⧉`, `↓`, `✕` | duplicate / reorder / remove act on the right rows |
+| 17–19 | `⤓ import script` → paste 12 lines → `add to board` → `save board` | 15 rows, `storyboard saved · 15 scene(s)` |
+| 20–21 | navigate away and back | **every row shows its own stored text + its own action/prop/emotion/visual**, not defaults |
+| 22–24 | PATCH `content_type=compare`, set `meta.side`, reload | group heads (⚖ side A / side B / summary) render and each grouped row keeps **its own** narration — this is the scene-index bug |
+| 24a–24c | 45 picker/duration edits across 15 rows | one POST; every row stores `character_action` + `emotion_style` + duration; page mirrors DB |
+| 24d–24e | caption panel; edit the Mode-A script and save | captions UI renders; a Director may still edit their own locked script |
+| 25–29 | `▶ Run Studio`, wait for the finished run | 15 rows survive with `max_scenes=3`; choices survive; the board refreshes **without a page reload**; no 404 flood on run polling |
+| 30–32 | open the QA tab, click `🛡️ Run Full QA Audit` | `GET /api/qa/project/<id>` is 200 (was 404 for an unbuilt project), the gate reports the render state **and** its `caption_contrast` dimension really measured the exported file |
+| 33 | `🤖 Ask Content Director` with Ollama offline | degrades to the deterministic analysis, no crash |
+| 34 | force `/runs/{id}/status` to answer 404 | polling **stops** (a handful of attempts, then 0 in the following 6s) and the view recovers — was 40 minutes of 404s |
+| 35 | click all 9 nav views | no React render error anywhere |
+| 36–43a | open 🎛️ Manual Control Panel, switch `sfx`/`qa` off, read the pre-run summary, run | the 4 load-bearing stages are locked on; the summary counts the reduced graph (`78 of 108 jobs`) and names what is skipped; the switched-off stages are recorded `skipped · stage disabled for this run` — never `done`; a run whose assembly was blocked cannot report `completed` |
+| 44–45 | untick a row's `in run` box | `meta.disabled` persists on the scene and `run-plan` drops it from the count (14/15) |
+| 45a | press the header **▶ Run Studio** instead of the panel's button | the header starts the *same* run — the panel's switches travel with it (that scene stays out, `sfx` still `skipped`) |
+| 46–48 | pick 🖤 Black Studio, save, override one row | every catalog type is offered with the server's own preview plate; the pick is stored on `settings.background`; the row override is stored on `scene.meta.background` |
+| 48a–48b | switch the project to AUTO while the panel still has stages off | the header says so (`⚠ panel had sfx/qa off — clear`) and clicking it writes the empty selection back — a warning you cannot dismiss is decoration |
+| 49 | watch the event log during a run | ≤130 lines mounted with a `show more` affordance, not the whole run in the DOM |
+
+## Why it exists
+
+Every `✓` here asserts an effect the server or the pixels confirm — a label or a
+class name alone would let a dead control pass, which is the failure mode these
+checks were written against.
+
+`git show 377dd9a` / `ac58437` — the manual board was silently destroying what it
+showed: `POST /scenes` dropped the picker keys, `meta` was re-filtered on every
+run, a hand-made 15-scene board was truncated to `pipeline.max_scenes`, the rows
+were indexed by group-relative counter (so grouped boards displayed blanks and
+wrote to the wrong scene), the QA tab 404'd for unbuilt projects, and a stale run
+id hammered `/runs/{id}/status` forever.
+
+Run the driver against the pre-fix source and 6 headline behaviours reproduce
+(blank narration cells, defaults instead of stored picks, meta wiped, 15 → 3
+scenes after a run, QA 404). That is the check that these assertions are real.

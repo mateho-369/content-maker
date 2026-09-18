@@ -89,15 +89,47 @@ goto VENV_DONE
 
 :VENV_READY
 echo   - Virtual environment ready: %VENV_DIR%
+:: A venv whose base Python moved (Python upgraded, folder copied from another PC)
+:: still has python.exe but cannot run anything. That used to hang here forever:
+:: pip itself was dead, so every later step failed with a confusing error.
+"%VENV_PY%" -c "import sys" >nul 2>&1
+if errorlevel 1 goto VENV_REBUILD
+goto VENV_PROBE
+
+:VENV_REBUILD
+echo   [!] .venv-studio exists but its interpreter is broken - recreating it.
+rmdir /s /q "%VENV_DIR%" >nul 2>&1
+%PY_CMD% -m venv "%VENV_DIR%"
+if errorlevel 1 goto VENV_FAIL
+"%VENV_PY%" -m pip install --quiet --upgrade pip setuptools wheel
+"%VENV_PY%" -m pip install -r "%SCRIPT_DIR%\requirements-studio.txt"
+if errorlevel 1 "%VENV_PY%" -m pip install fastapi "uvicorn[standard]" python-multipart "pillow>=10.4.0" numpy uharfbuzz khmercut opencv-python-headless imageio-ffmpeg edge-tts ffmpeg-python pysubs2
+goto VENV_DONE
+
+:VENV_PROBE
 :: Verify essential dependencies are installed (in case previous install failed or was partial)
-"%VENV_PY%" -c "import multipart, fastapi, uvicorn, PIL, cv2" >nul 2>&1
-if errorlevel 1 (
-  echo   - Missing dependencies detected in .venv-studio (e.g. python-multipart).
-  echo   - Completing installation of studio dependencies...
-  "%VENV_PY%" -m pip install -r "%SCRIPT_DIR%\requirements-studio.txt"
-  if errorlevel 1 "%VENV_PY%" -m pip install fastapi "uvicorn[standard]" python-multipart "pillow>=10.4.0" numpy uharfbuzz khmercut opencv-python-headless imageio-ffmpeg edge-tts ffmpeg-python pysubs2
-  echo   - Virtual environment dependencies updated.
-)
+"%VENV_PY%" -c "import multipart, fastapi, uvicorn, PIL, cv2, numpy" >nul 2>&1
+if errorlevel 1 goto VENV_COMPLETE
+goto VENV_TTS
+
+:VENV_COMPLETE
+echo   - Missing dependencies detected in .venv-studio, e.g. python-multipart.
+echo   - Completing installation of studio dependencies...
+"%VENV_PY%" -m pip install -r "%SCRIPT_DIR%\requirements-studio.txt"
+if errorlevel 1 "%VENV_PY%" -m pip install fastapi "uvicorn[standard]" python-multipart "pillow>=10.4.0" numpy uharfbuzz khmercut opencv-python-headless imageio-ffmpeg edge-tts ffmpeg-python pysubs2
+echo   - Virtual environment dependencies updated.
+
+:VENV_TTS
+:: Edge-TTS is the voice most users actually want. It is installed from
+:: requirements-studio.txt, but a partial or old install used to leave the
+:: Voices tab empty and silently fall back to placeholder beeps.
+"%VENV_PY%" -c "import edge_tts" >nul 2>&1
+if not errorlevel 1 goto VENV_DONE
+echo   - Installing Edge-TTS - Microsoft neural Khmer voices, km-Khmer-Piseth/Sina...
+"%VENV_PY%" -m pip install "edge-tts>=6.1.0"
+"%VENV_PY%" -c "import edge_tts" >nul 2>&1
+if errorlevel 1 echo   [WARNING] Edge-TTS could not be installed - offline Khmer voice and
+if errorlevel 1 echo             Sherpa-onnx still work; see 2_SETUP_KHMER_TTS.bat.
 goto VENV_DONE
 
 :VENV_FAIL
@@ -124,6 +156,19 @@ echo   - Reusable mascot asset verified: Kiri
 :: ---------------------------------------------------------------------------
 :: STEP 4: Start Studio Server & Open Browser
 :: ---------------------------------------------------------------------------
+:: The workspace is a built React bundle served from ai_studio\static. A source
+:: checkout (or a failed build) used to open a blank page with no explanation.
+if exist "%SCRIPT_DIR%\ai_studio\static\index.html" goto START_STUDIO
+echo.
+echo   [!] The studio app has not been built yet - building it now.
+where npm >nul 2>&1
+if errorlevel 1 goto START_STUDIO
+pushd "%SCRIPT_DIR%\ai_studio\frontend"
+call npm install --no-audit --no-fund
+call npm run build
+popd
+if not exist "%SCRIPT_DIR%\ai_studio\static\index.html" echo   [WARNING] npm build did not produce ai_studio\static - run: npm --prefix ai_studio\frontend run build
+
 :START_STUDIO
 echo.
 echo [4/4] Starting Khmer AI Content Studio on http://localhost:8000 ...

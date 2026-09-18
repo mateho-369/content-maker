@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { StatusPayload, TtsVoiceStatus } from "./api";
 
 // Verbatim user-facing copy for the Khmer-voice status badge.
@@ -127,4 +127,135 @@ export const StatusBadge = ({ status }: { status: string }) => {
 
 export const Empty = ({ text }: { text: string }) => (
   <div className="hint" style={{ padding: 14, textAlign: "center" }}>{text}</div>
+);
+
+
+/* ─────────────────────────── one-screen workspace atoms ───────────────────────────
+   The shell used to be nine pages you navigated between; these are the pieces that
+   let one screen hold them all: a slide-over drawer, toggle chips, a debounced text
+   field that says when it saved, skeletons for the first paint, and the two hooks
+   that make focus/visibility survive a reload. */
+
+/** localStorage-backed state. Panel open/closed and drawer width are the two things
+ *  nobody wants to set again on every reload — and a corrupt value must not blank
+ *  the screen, so every read is guarded. */
+export function useSticky<T>(key: string, initial: T): [T, (v: T | ((p: T) => T)) => void] {
+  const [val, setVal] = useState<T>(() => {
+    try {
+      const raw = window.localStorage.getItem(key);
+      return raw === null ? initial : (JSON.parse(raw) as T);
+    } catch { return initial; }
+  });
+  const set = useCallback((v: T | ((p: T) => T)) => {
+    setVal((prev) => {
+      const next = typeof v === "function" ? (v as (p: T) => T)(prev) : v;
+      try { window.localStorage.setItem(key, JSON.stringify(next)); } catch { /* private mode */ }
+      return next;
+    });
+  }, [key]);
+  return [val, set];
+}
+
+/** Global shortcuts for the shell. `enabled` keeps the palette from stealing keys
+ *  while a modal is open, and typing in a field never triggers a jump. */
+export function useHotkeys(map: Record<string, (e: KeyboardEvent) => void>, enabled = true) {
+  const ref = useRef(map);
+  ref.current = map;
+  useEffect(() => {
+    if (!enabled) return;
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      const typing = !!t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
+      const combo = `${e.metaKey || e.ctrlKey ? "mod+" : ""}${e.altKey ? "alt+" : ""}${e.shiftKey ? "shift+" : ""}${e.key.toLowerCase()}`;
+      const fn = ref.current[combo];
+      if (!fn) return;
+      // ⌘-combos always win (they cannot be typing); a bare key is ignored while a
+      // field has focus, so a digit still types into the box. Escape is the one
+      // exception: closing an overlay from inside its search field is the point.
+      if (typing && !combo.startsWith("mod+") && e.key !== "Escape") return;
+      e.preventDefault();
+      fn(e);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [enabled]);
+}
+
+export const Chip = ({ on, children, onClick, title, kbd, className = "" }: {
+  on?: boolean; children: React.ReactNode; onClick?: () => void; title?: string;
+  kbd?: string; className?: string;
+}) => (
+  <button type="button" className={`chip ${on ? "on" : ""} ${className}`} onClick={onClick}
+    title={title} data-active={on ? "1" : undefined}>
+    <span className="chip-body">{children}</span>
+    {kbd ? <kbd>{kbd}</kbd> : null}
+  </button>
+);
+
+/** Slide-over for everything that is not the current project (settings, team,
+ *  history, gallery…). It is a dialog for a11y reasons, so Esc closes it. */
+export const Drawer = ({ open, onClose, title, children, width, onWidth, testid }: {
+  open: boolean; onClose: () => void; title: React.ReactNode; children: React.ReactNode;
+  width: number; onWidth: (w: number) => void; testid?: string;
+}) => {
+  const drag = useRef<{ x: number; w: number } | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const move = (e: MouseEvent) => {
+      if (!drag.current) return;
+      onWidth(Math.max(340, Math.min(900, Math.round(drag.current.w - (e.clientX - drag.current.x)))));
+    };
+    const up = () => { drag.current = null; document.body.classList.remove("resizing"); };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+    return () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
+  }, [open, onWidth]);
+  if (!open) return null;
+  return (
+    <div className="drawer-scrim" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <aside className="drawer" style={{ width }} data-testid={testid} role="dialog" aria-modal="true">
+        <div className="drawer-grip" title="drag to resize"
+          onMouseDown={(e) => { drag.current = { x: e.clientX, w: width }; document.body.classList.add("resizing"); }} />
+        <div className="drawer-h spread"><h3>{title}</h3>
+          <button className="ghost" onClick={onClose} title="close (Esc)">×</button></div>
+        <div className="drawer-b">{children}</div>
+      </aside>
+    </div>
+  );
+};
+
+export const Skeleton = ({ rows = 3 }: { rows?: number }) => (
+  <div className="skel" aria-hidden="true">
+    {Array.from({ length: rows }).map((_, i) => <div key={i} className="skel-row" style={{ width: `${92 - i * 11}%` }} />)}
+  </div>
+);
+
+/** A label + control that tells you when it wrote to the server. The old forms
+ *  changed a value with no feedback, so you could not tell "saved" from "ignored". */
+export const Field = ({ label, hint, children, saved, error }: {
+  label: string; hint?: string; children: React.ReactNode; saved?: boolean; error?: string;
+}) => (
+  <label className={`field ${error ? "bad" : ""}`}>
+    <span className="field-h"><span>{label}</span>
+      {error ? <em className="field-state err">{error}</em>
+        : saved ? <em className="field-state ok">saved</em> : null}
+    </span>
+    {children}
+    {hint ? <span className="field-hint">{hint}</span> : null}
+  </label>
+);
+
+/** Empty state with a reason and the action that fixes it — a bare "no data" is how
+ *  a broken feature gets mistaken for an unused one. */
+export const Notice = ({ kind = "info", title, children, action }: {
+  kind?: "info" | "warn" | "err" | "ok"; title?: React.ReactNode; children?: React.ReactNode; action?: React.ReactNode;
+}) => (
+  <div className={`notice ${kind}`} role="status">
+    <span className="notice-mark">{kind === "ok" ? "✓" : kind === "err" ? "✕" : kind === "warn" ? "⚠" : "ℹ"}</span>
+    <div className="notice-body">
+      {title ? <b>{title}</b> : null}
+      {children ? <div className="notice-text">{children}</div> : null}
+    </div>
+    {action ? <div className="notice-action">{action}</div> : null}
+  </div>
 );
