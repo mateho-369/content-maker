@@ -21,8 +21,8 @@ python -m ai_studio --demo      # http://localhost:8000 with three sample projec
 
 > This is the "v4" of the repo's agent system: it reuses `ai_creator/`'s role→model
 > mapping and JSON-extraction helpers, but replaces its linear script with a real async
-> job graph. The older studio (`ai_creator/`, also port 8000) and this one can't run at
-> the same time on the default port — give one of them `--port 8002`.
+> job graph. `ai_creator/` and `src/` no longer have their own web apps — their engines are
+> imported here, so there is exactly one server to start and one settings file to edit.
 
 ---
 
@@ -485,11 +485,26 @@ UI must end with `npm run build` before delivery,* because FastAPI serves the bu
 
 ### 6b · The UI, panel by panel (Premiere-style, dark, dense)
 
-* **Top bar** — project name, run controls (Run / Pause / Resume / Cancel / Regenerate),
-  health dot (backend + Ollama + ComfyUI + RVC), global Search.
-* **Left sidebar** — Projects (cards with poster, mode/content-type badges, duplicate,
-  delete), **New project**, and Services / AI Team / Plugins / Characters / Voices /
-  Settings / Memory. Keyboard-friendly, window-docked panels — no marketing hero.
+* **Top bar** — the open project (a picker that swaps projects without a page change),
+  run controls (Run / Pause / Resume / Cancel / Regenerate), the health dot
+  (backend + Ollama + ComfyUI + RVC), the TTS voice pill, `⟳` re-probe and ⌘K.
+* **Left rail** — `+ New project`, one filter box, a status and a mode select, and the
+  project list with badges; below it the ten workspace sections. Everything the old
+  page-per-concern layout had is here, nothing is behind a page any more.
+* **Panel chips** (`⌘1…⌘4`) — the four panels of a project are toggles, not tabs: switch
+  two on and they stack, so you can read the Director's script *while* editing the board
+  instead of losing your scroll position to a tab swap. Choices persist per project.
+* **Identity** — title, duration, content type, status, topic, character, voice and style
+  notes are editable in the workspace itself (debounced `PATCH /api/projects/{id}`, a
+  tick per saved field) — no "go to the wizard to change a duration".
+* **Manual core stages** — in manual mode every stage switch is clickable, including the
+  five that produce the film. Turning one off asks for a confirm first, because the run
+  then ends `partial` and the finished MP4 is not produced; the panel label keeps saying
+  `skipped · no cut` until it is back on. Nothing is ever reported as complete that
+  did not run.
+* **Keyboard** — ⌘K jump to anything · ⌘B drawer · ⌘G gallery · ⌘C clip a video ·
+  ⌘H history · ⌘, settings · ⌘⇧N new project · ⌘1…⌘4 panels · Escape closes the
+  drawer, the palette, the wizard (Escape still reaches a field you are typing in).
 * **Center** — the scene board (cards = scenes with icons, per-scene character/side
   badges) and the live pipeline DAG (10 stages × scenes in one grid, exact stage names,
   live over WebSocket/SSE with polling fallback).
@@ -520,6 +535,13 @@ UI must end with `npm run build` before delivery,* because FastAPI serves the bu
 * **Services** — Studio (8000) / Ollama (11434) / RVC (9513) / ComfyUI (8188) live status,
   click-to-open, and the exact `--check` fix command per engine shown verbatim.
 * **History** — projects + runs tables (mode, content type, status, poster, duplicate).
+* **Gallery** — every finished cut, read from the render records; `?probe=1` decodes the
+  real file so width/height/duration are measured, not quoted from the pipeline (the
+  unprobed note says so out loud). `/gallery` redirects here instead of serving a
+  hand-drawn page about three old renders.
+* **Clip a video** — the old Auto-Clip page, as a panel: drop a 16:9 video, see the
+  highlight candidates with their scores, pick a crop + caption style, export; job
+  state lives in memory and the panel says so when the server restarted.
 
 ### 6c · Subtitles & title cards
 
@@ -638,10 +660,10 @@ the output JSON/audio/asset files:
 | Ollama slow / 429 | model cold or num_ctx too big | `ollama pull sailor2:8b` once, keep `num_ctx 4096`, or set role model to `llama3.2:3b` |
 | "waiting for the Director to approve the script" | Mode B review gate, working as intended | Approve / edit / regenerate on the project page (or set `review_gate: never`) |
 | Run stays 100 % GPU-bound for minutes | one long scene split into two clips | normal: 2 clips × 81 frames @ 8 GB; shorten the scene or lower `video.steps` |
-| `audioop`/`gtts` import errors | legacy `ai_creator/` extras in a slim venv | not needed by the studio; `pip install -r requirements.txt` if you also use the old UI |
+| `audioop`/`gtts` import errors | legacy `ai_creator/` extras in a slim venv | not needed by the studio; `pip install -r requirements.txt` only if you use `run.bat` / `start.bat` headlessly |
 | CUDA OOM anyway | another app holding VRAM (browser, DAW, game overlay) | close it, or raise `vram.reserve_free_mb`, or set `video.max_frames` 49 |
 | `database is locked` | you opened the same DB twice (two servers) | one server per data dir; the DB already uses WAL + 8 s busy timeout |
-| Port 8000 busy | the legacy `ai_creator` app is up | `--port 8002` for one of them |
+| Port 8000 busy | a studio already running (or a stale one) | `python -m ai_studio --port 8010`, or stop the other process — one server per data dir |
 
 ---
 

@@ -12,8 +12,6 @@ auto-clip\
     run_studio.bat           <- only Khmer Studio :8000
     run_comfyui.bat          <- only ComfyUI :8188
     run_rvc.bat              <- only RVC :9513/:7865
-    run_ai_creator.bat       <- legacy AI Creator :8002
-    run_legacy_clipper.bat   <- legacy Auto-Clip v3 :8001
     check_system.bat         <- diagnostics + readiness report
     STOP_ALL.bat             <- kill all services
     START_ALL_FROM_ROOT.bat  <- copy this to auto-clip\START_ALL.bat
@@ -102,10 +100,16 @@ START.bat --no-rvc        :: skip RVC
 START.bat --no-ollama     :: skip Ollama check
 ```
 
-## Legacy apps
+## The two legacy launchers are gone
 
-- `run_ai_creator.bat` -> http://localhost:8002/ (AI Creator, uses different port to avoid clash with Studio :8000)
-- `run_legacy_clipper.bat` -> http://localhost:8001/ (Auto-Clip v3 src/)
+`run_ai_creator.bat` (:8002) and `run_legacy_clipper.bat` (:8001) launched separate Jinja
+front-ends with their own settings files. Both pages are deleted; the engines they wrapped
+are panels of the studio now:
+
+- AI-team planner, characters, voices, image search, SFX library -> the studio's own panels;
+- long-video clipping -> **Clip a video** in the studio rail (⌘C).
+
+`run.bat` / `start.bat` (headless clip runs) are untouched and still write to `output/`.
 
 ## For PowerShell users
 

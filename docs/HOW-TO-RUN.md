@@ -25,6 +25,31 @@ Each service has its **own Python virtual environment** — they are not
 interchangeable. Always run each one with its own venv's `python.exe`, from
 that project's own folder.
 
+## The one-click launcher
+
+`1_CLICK_START.bat` in the repo root is the path most users should take. It finds
+Python, creates `.venv-studio`, installs `requirements-studio.txt`, starts the
+server on `:8000` and opens the studio + gallery. What it also does now, because
+those were the failures people hit:
+
+- **repairs a venv that cannot run** — a `.venv-studio` left behind by an upgraded
+  Python has a `python.exe` that answers nothing, and every later step used to fail
+  with a confusing pip error. The launcher notices, recreates the venv, reinstalls;
+- **completes a partial install** — it imports `multipart, fastapi, uvicorn, PIL,
+  cv2, numpy` and installs whatever is missing instead of assuming the first run
+  succeeded;
+- **installs Edge-TTS** — the neural Khmer voices the Voice dropdown offers are
+  useless without it, so a missing `edge_tts` is healed on its own (and if the
+  install fails you are told Sherpa/offline still works, not left with an empty
+  Voices tab);
+- **builds the browser app if it was never built** — the workspace serves the React
+  bundle from `ai_studio/static`, and a source checkout without it used to open a
+  blank page. If `npm` is available it runs `npm install && npm run build` in
+  `ai_studio/frontend`; if not, it says so.
+
+Use `START.bat` (or the commands below) when you want to control the pieces
+yourself.
+
 ## Startup order
 
 1. **Ollama** — usually already running in the background (check with
